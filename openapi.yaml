@@ -1,0 +1,1335 @@
+openapi: 3.1.1
+info:
+  title: E-commerce Simulation Agent API
+  version: 0.1.0
+  summary: API для агента, управляющего интернет-магазином в симуляции
+  description: |
+    Публичный HTTP API для запуска детерминированной симуляции и управления
+    интернет-магазином от имени агента.
+
+    В симуляции есть три типа страниц:
+
+    1. `product_list` — список товаров;
+    2. `product_page` — страница конкретного товара;
+    3. `purchase` — страница покупки. Успешный вызов этой страницы означает покупку.
+
+    Каждый запрос посетителя создаёт нагрузку в условных единицах на заданное
+    время и оставляет запись в site logs со статусом 200 или 500. Серверы имеют
+    ограниченную capacity и стоят денег. Агент может наблюдать метрики и логи,
+    изменять число серверов, применять fixes, запускать подготовленные deployments,
+    выполнять deployments строго по очереди и явно прокручивать время.
+
+    `seed < 0` обозначает заранее созданный вручную мир. Он обязан существовать в
+    базе данных. `seed > 0` обозначает генерируемый мир: сервер использует уже
+    сохранённый мир с тем же seed и версией генератора либо детерминированно создаёт
+    и сохраняет его. `seed = 0` запрещён.
+
+    Seed идентифицирует мир, а `run_id` — отдельную попытку агента пройти этот мир.
+    Каждый новый успешный `/start` создаёт независимый run, кроме идемпотентного
+    повтора с теми же `agent_id`, `agent_version` и `request_id`.
+
+    На каждом запросе к существующему run симуляционное время сначала продвигается
+    на реальное время, прошедшее с предыдущего вызова этого run. Для
+    `/time/advance` применяется `max(real_elapsed, requested_duration)`. Явно
+    запросить продвижение менее чем на 300 секунд нельзя.
+
+    `agent_id` и `agent_version` используются для атрибуции и фильтрации запусков,
+    но не являются подтверждением личности. Доступ авторизуется API key из
+    заголовка `X-Agent-API-Key`.
+
+servers:
+  - url: /
+    description: Тот же origin, с которого получен OpenAPI-документ
+
+security:
+  - AgentApiKey: []
+
+tags:
+  - name: Run lifecycle
+    description: Создание запуска симуляции
+  - name: Observability
+    description: Состояние сайта, метрики и логи
+  - name: Resources
+    description: Серверы и их capacity
+  - name: Fixes
+    description: Применение fixes, найденных в логах
+  - name: Deployments
+    description: Доступные и запущенные deployments
+  - name: Probes
+    description: Синтетические проверки страниц
+  - name: Time
+    description: Явное продвижение симуляционного времени
+
+paths:
+  /v1/start:
+    post:
+      tags: [Run lifecycle]
+      operationId: startRun
+      summary: Создать новый запуск симуляции
+      description: |
+        Находит или создаёт мир по seed, затем создаёт независимый run.
+
+        Для отрицательного seed мир должен быть заранее создан вручную. Для
+        положительного seed отсутствующий мир генерируется детерминированно.
+        Повтор с теми же `agent_id`, `agent_version` и `request_id` возвращает
+        ранее созданный run и не создаёт новый.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRunRequest'
+            examples:
+              generatedWorld:
+                summary: Сгенерированный мир
+                value:
+                  seed: 42
+                  agent_id: sre-agent
+                  agent_version: 3.2.0
+                  request_id: start-20260824-001
+              manualWorld:
+                summary: Подготовленный вручную мир
+                value:
+                  seed: -3
+                  agent_id: sre-agent
+                  agent_version: 3.2.0
+                  request_id: start-20260824-002
+      responses:
+        '201':
+          description: Новый run создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRunResponse'
+        '200':
+          description: Идемпотентный повтор; возвращён ранее созданный run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRunResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          description: Ручной мир с отрицательным seed не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: MANUAL_WORLD_NOT_FOUND
+                message: Manual world with seed -3 does not exist
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/overview:
+    get:
+      tags: [Observability]
+      operationId: getOverview
+      summary: Получить общее состояние запуска
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Текущее состояние сайта и запуска
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OverviewResponse'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/metrics:
+    get:
+      tags: [Observability]
+      operationId: getMetrics
+      summary: Получить текущие метрики или временные ряды
+      description: |
+        Без `from` и `to` возвращает текущий snapshot. Для запроса за период
+        следует передать оба параметра. `names` ограничивает набор метрик.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: step_seconds
+          in: query
+          description: Шаг агрегации временного ряда
+          schema:
+            type: integer
+            minimum: 1
+            default: 60
+        - name: names
+          in: query
+          description: Имена метрик через запятую; отсутствие параметра возвращает базовый набор
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/MetricName'
+        - name: page
+          in: query
+          description: Ограничить page-specific метрики одним типом страницы
+          schema:
+            $ref: '#/components/schemas/PageType'
+      responses:
+        '200':
+          description: Метрики запуска
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/logs:
+    get:
+      tags: [Observability]
+      operationId: getSiteLogs
+      summary: Получить site logs
+      description: |
+        Возвращает логи уже произошедших запросов посетителей и probes. Логи могут
+        содержать сообщение с fix-текстом для активного бага. Audit log вызовов
+        самого агента этим endpoint не возвращается.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Cursor'
+        - name: page
+          in: query
+          schema:
+            $ref: '#/components/schemas/PageType'
+        - name: status
+          in: query
+          schema:
+            type: integer
+            enum: [200, 500]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        '200':
+          description: Страница логов в хронологическом порядке
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogsResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/resources:
+    get:
+      tags: [Resources]
+      operationId: getResources
+      summary: Получить серверы, capacity и стоимость
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Текущие ресурсы запуска
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourcesResponse'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/resources/backend:
+    put:
+      tags: [Resources]
+      operationId: setBackendServerCount
+      summary: Установить желаемое количество backend-серверов
+      description: |
+        Идемпотентно задаёт desired instance count. Добавление и удаление серверов
+        может выполняться асинхронно. Сервер с активными запросами сначала переходит
+        в `draining`. Стоимость начисляется по симуляционному времени.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScaleBackendRequest'
+            example:
+              request_id: scale-20260824-001
+              desired_instances: 4
+      responses:
+        '202':
+          description: Изменение количества серверов принято
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationAcceptedResponse'
+        '200':
+          description: Желаемое состояние уже достигнуто или возвращён результат идемпотентного повтора
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/fixes:
+    post:
+      tags: [Fixes]
+      operationId: applyFix
+      summary: Применить fix по тексту из site logs
+      description: |
+        Если `message` совпадает с fix-текстом активного бага, баг полностью
+        деактивируется и больше не вызывает ошибки. Повтор с тем же `request_id`
+        возвращает исходный результат.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyFixRequest'
+            example:
+              request_id: fix-20260824-001
+              message: FIX-7F92A
+      responses:
+        '200':
+          description: Fix проверен и, при совпадении, применён
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApplyFixResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/deployments:
+    get:
+      tags: [Deployments]
+      operationId: getDeployments
+      summary: Получить упорядоченную очередь deployments
+      description: |
+        Deployments являются последовательными задачами агента. Запустить можно
+        только первый незавершённый deployment со статусом `available`; последующие
+        имеют статус `locked`. Скрытые эффекты и будущие баги не раскрываются.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Список deployments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentsResponse'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    post:
+      tags: [Deployments]
+      operationId: startDeployment
+      summary: Запустить подготовленный deployment
+      description: |
+        Deployment может изменить нагрузку страниц, время удержания ресурсов,
+        вероятность ошибок или активировать/деактивировать баги. В запросе передаётся
+        только ID подготовленного deployment, а не произвольный код. Запрос
+        deployment не по очереди отклоняется с `DEPLOYMENT_ORDER_VIOLATION`.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartDeploymentRequest'
+            example:
+              request_id: deploy-20260824-001
+              deployment_id: catalog-cache-v1
+      responses:
+        '202':
+          description: Deployment принят к выполнению
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationAcceptedResponse'
+        '200':
+          description: Результат идемпотентного повтора
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          description: Run или deployment не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/operations/{operation_id}:
+    get:
+      tags: [Resources, Deployments]
+      operationId: getOperation
+      summary: Получить статус длительной операции
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/OperationId'
+      responses:
+        '200':
+          description: Состояние операции
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResponse'
+        '404':
+          description: Run или операция не найдены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/probes:
+    post:
+      tags: [Probes]
+      operationId: probePage
+      summary: Выполнить синтетический запрос к странице
+      description: Probe создаёт обычную нагрузку и запись в site logs.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProbeRequest'
+            examples:
+              productList:
+                value:
+                  request_id: probe-20260824-001
+                  page: product_list
+              productPage:
+                value:
+                  request_id: probe-20260824-002
+                  page: product_page
+                  product_id: product-7
+      responses:
+        '200':
+          description: Результат synthetic probe
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/economy:
+    get:
+      tags: [Observability]
+      operationId: getEconomy
+      summary: Получить финансовое состояние запуска
+      description: |
+        Возвращает фактические показатели агента. Максимально достижимый баланс и
+        oracle plan агенту не раскрываются.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Выручка, расходы и текущий баланс
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EconomyResponse'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/runs/{run_id}/time/advance:
+    post:
+      tags: [Time]
+      operationId: advanceTime
+      summary: Явно прокрутить симуляционное время
+      description: |
+        `duration_seconds` должен быть не меньше 300. Фактическое продвижение равно
+        `max(real_elapsed_since_previous_request, duration_seconds)`. Повтор с тем же
+        `request_id` не продвигает время второй раз.
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdvanceTimeRequest'
+            example:
+              request_id: advance-20260824-001
+              duration_seconds: 86400
+      responses:
+        '200':
+          description: Время продвинуто, наступившие события обработаны
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvanceTimeResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+components:
+  securitySchemes:
+    AgentApiKey:
+      type: apiKey
+      in: header
+      name: X-Agent-API-Key
+      description: |
+        Ключ выдаётся оператором симуляции. Сервер может проверять, что переданный
+        в `/start` `agent_id` разрешён для этого ключа.
+
+  parameters:
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      description: Неподбираемый буквенно-цифровой идентификатор запуска
+      schema:
+        $ref: '#/components/schemas/RunId'
+    OperationId:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9]{16,64}$'
+        examples: [8Mx2Qa7Pc4Vn9Rt5]
+    From:
+      name: from
+      in: query
+      description: Начало периода в симуляционном времени, включительно
+      schema:
+        type: string
+        format: date-time
+    To:
+      name: to
+      in: query
+      description: Конец периода в симуляционном времени, включительно
+      schema:
+        type: string
+        format: date-time
+    Cursor:
+      name: cursor
+      in: query
+      description: Непрозрачный cursor из предыдущего ответа
+      schema:
+        type: string
+        maxLength: 512
+
+  responses:
+    InvalidRequest:
+      description: Запрос не соответствует контракту или нарушает ограничения
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalidSeed:
+              value:
+                error: INVALID_SEED
+                message: Seed must be a non-zero integer
+            minimumAdvance:
+              value:
+                error: MINIMUM_ADVANCE_IS_300_SECONDS
+                message: duration_seconds must be at least 300
+    RunNotFound:
+      description: Run с таким ID не существует
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: RUN_NOT_FOUND
+            message: Run does not exist
+    Conflict:
+      description: Конфликт состояния, конкурентный запрос или недопустимый порядок действий
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            concurrentRequest:
+              value:
+                error: CONCURRENT_RUN_REQUEST
+                message: Another request is currently modifying this run
+            taskOrder:
+              value:
+                error: DEPLOYMENT_ORDER_VIOLATION
+                message: The requested deployment is not currently available
+
+  schemas:
+    RunId:
+      type: string
+      description: Криптографически случайный base62 ID; не является хешем seed
+      pattern: '^[A-Za-z0-9]{20,64}$'
+      examples: [7Kp3mN8qR2vX5cL9tF4a]
+
+    RequestId:
+      type: string
+      description: Идемпотентный ID, уникальный в пределах агента или run
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9._:-]+$'
+      examples: [request-20260824-001]
+
+    AgentId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+      examples: [sre-agent]
+
+    AgentVersion:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$'
+      examples: [3.2.0]
+
+    PageType:
+      type: string
+      enum:
+        - product_list
+        - product_page
+        - purchase
+
+    RunStatus:
+      type: string
+      enum: [running, completed, failed]
+
+    SiteStatus:
+      type: string
+      enum: [healthy, degraded, unavailable]
+
+    OperationStatus:
+      type: string
+      enum: [queued, running, succeeded, failed]
+
+    Clock:
+      type: object
+      additionalProperties: false
+      required:
+        - simulation_time
+        - simulation_ends_at
+        - remaining_seconds
+        - real_elapsed_seconds
+        - applied_advance_seconds
+      properties:
+        simulation_time:
+          type: string
+          format: date-time
+          description: Текущее симуляционное время после автоматического продвижения
+        simulation_ends_at:
+          type: string
+          format: date-time
+          description: Максимальный момент времени, до которого работает этот run
+        remaining_seconds:
+          type: number
+          minimum: 0
+          description: Сколько симуляционных секунд осталось до завершения run
+        real_elapsed_seconds:
+          type: number
+          minimum: 0
+          description: Реальное время с предыдущего вызова этого run
+        applied_advance_seconds:
+          type: number
+          minimum: 0
+          description: Фактическое продвижение симуляции перед выполнением запроса
+
+    TimeWindow:
+      type: object
+      additionalProperties: false
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+
+    StartRunRequest:
+      type: object
+      additionalProperties: false
+      required: [seed, agent_id, agent_version, request_id]
+      properties:
+        seed:
+          type: integer
+          not:
+            const: 0
+          description: Отрицательный — ручной мир; положительный — генерируемый мир
+        agent_id:
+          $ref: '#/components/schemas/AgentId'
+        agent_version:
+          $ref: '#/components/schemas/AgentVersion'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+
+    StartRunResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - run_id
+        - seed
+        - agent_id
+        - agent_version
+        - status
+        - simulation_time
+        - simulation_ends_at
+      properties:
+        run_id:
+          $ref: '#/components/schemas/RunId'
+        seed:
+          type: integer
+        agent_id:
+          $ref: '#/components/schemas/AgentId'
+        agent_version:
+          $ref: '#/components/schemas/AgentVersion'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        simulation_time:
+          type: string
+          format: date-time
+        simulation_ends_at:
+          type: string
+          format: date-time
+
+    OverviewResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - clock
+        - run_id
+        - status
+        - site_status
+        - current_deployment_id
+        - server_count
+        - capacity_utilization
+        - error_rate
+        - balance_minor
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        run_id:
+          $ref: '#/components/schemas/RunId'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        site_status:
+          $ref: '#/components/schemas/SiteStatus'
+        current_deployment_id:
+          type: [string, 'null']
+        server_count:
+          type: integer
+          minimum: 0
+        capacity_utilization:
+          type: number
+          minimum: 0
+        error_rate:
+          type: number
+          minimum: 0
+          maximum: 1
+        successful_purchases:
+          type: integer
+          minimum: 0
+        revenue_minor:
+          type: integer
+        server_cost_minor:
+          type: integer
+          minimum: 0
+        balance_minor:
+          type: integer
+
+    MetricName:
+      type: string
+      enum:
+        - server_count
+        - capacity_units
+        - used_load_units
+        - capacity_utilization
+        - active_requests
+        - requests_total
+        - responses_200
+        - responses_500
+        - error_rate
+        - latency_p50_ms
+        - latency_p95_ms
+        - successful_purchases
+        - revenue_minor
+        - lost_revenue_minor
+        - server_cost_minor
+
+    MetricValue:
+      oneOf:
+        - type: integer
+        - type: number
+
+    MetricPoint:
+      type: object
+      additionalProperties: false
+      required: [timestamp, name, value]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        name:
+          $ref: '#/components/schemas/MetricName'
+        page:
+          oneOf:
+            - $ref: '#/components/schemas/PageType'
+            - type: 'null'
+        value:
+          $ref: '#/components/schemas/MetricValue'
+
+    PageMetrics:
+      type: object
+      additionalProperties: false
+      required:
+        - page
+        - active_requests
+        - used_load_units
+        - responses_200
+        - responses_500
+        - error_rate
+      properties:
+        page:
+          $ref: '#/components/schemas/PageType'
+        active_requests:
+          type: integer
+          minimum: 0
+        used_load_units:
+          type: number
+          minimum: 0
+        responses_200:
+          type: integer
+          minimum: 0
+        responses_500:
+          type: integer
+          minimum: 0
+        error_rate:
+          type: number
+          minimum: 0
+          maximum: 1
+
+    MetricSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - server_count
+        - capacity_units
+        - used_load_units
+        - capacity_utilization
+        - active_requests
+        - responses_200
+        - responses_500
+        - error_rate
+        - successful_purchases
+        - revenue_minor
+        - lost_revenue_minor
+        - server_cost_minor
+        - by_page
+      properties:
+        server_count:
+          type: integer
+          minimum: 0
+        capacity_units:
+          type: number
+          minimum: 0
+        used_load_units:
+          type: number
+          minimum: 0
+        capacity_utilization:
+          type: number
+          minimum: 0
+        active_requests:
+          type: integer
+          minimum: 0
+        responses_200:
+          type: integer
+          minimum: 0
+        responses_500:
+          type: integer
+          minimum: 0
+        error_rate:
+          type: number
+          minimum: 0
+          maximum: 1
+        latency_p50_ms:
+          type: number
+          minimum: 0
+        latency_p95_ms:
+          type: number
+          minimum: 0
+        successful_purchases:
+          type: integer
+          minimum: 0
+        revenue_minor:
+          type: integer
+        lost_revenue_minor:
+          type: integer
+          minimum: 0
+        server_cost_minor:
+          type: integer
+          minimum: 0
+        by_page:
+          type: array
+          items:
+            $ref: '#/components/schemas/PageMetrics'
+
+    MetricsResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, current, series]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        window:
+          oneOf:
+            - $ref: '#/components/schemas/TimeWindow'
+            - type: 'null'
+        current:
+          $ref: '#/components/schemas/MetricSnapshot'
+        series:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricPoint'
+
+    RequestLog:
+      type: object
+      additionalProperties: false
+      required:
+        - timestamp
+        - request_id
+        - source
+        - page
+        - status
+        - load_units
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        request_id:
+          type: string
+        source:
+          type: string
+          enum: [visitor, probe]
+        visitor_id:
+          type: [string, 'null']
+        page:
+          $ref: '#/components/schemas/PageType'
+        product_id:
+          type: [string, 'null']
+        status:
+          type: integer
+          enum: [200, 500]
+        latency_ms:
+          type: number
+          minimum: 0
+        load_units:
+          type: number
+          minimum: 0
+        server_id:
+          type: [string, 'null']
+        error:
+          type: [string, 'null']
+          description: Например SERVER_CAPACITY_EXCEEDED или PAGE_BUG
+        message:
+          type: [string, 'null']
+          description: Может содержать fix-текст активного бага
+
+    LogsResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, logs, next_cursor]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequestLog'
+        next_cursor:
+          type: [string, 'null']
+
+    ServerStatus:
+      type: string
+      enum: [provisioning, active, draining, stopped, failed]
+
+    ServerResource:
+      type: object
+      additionalProperties: false
+      required:
+        - server_id
+        - status
+        - capacity_units
+        - used_load_units
+        - cost_per_hour_minor
+      properties:
+        server_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/ServerStatus'
+        capacity_units:
+          type: number
+          minimum: 0
+        used_load_units:
+          type: number
+          minimum: 0
+        cost_per_hour_minor:
+          type: integer
+          minimum: 0
+
+    ResourcesResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - clock
+        - desired_instances
+        - active_instances
+        - total_capacity_units
+        - used_load_units
+        - total_cost_per_hour_minor
+        - servers
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        desired_instances:
+          type: integer
+          minimum: 0
+        active_instances:
+          type: integer
+          minimum: 0
+        total_capacity_units:
+          type: number
+          minimum: 0
+        used_load_units:
+          type: number
+          minimum: 0
+        total_cost_per_hour_minor:
+          type: integer
+          minimum: 0
+        servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServerResource'
+
+    ScaleBackendRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, desired_instances]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        desired_instances:
+          type: integer
+          minimum: 0
+          maximum: 1000
+
+    OperationAcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, operation_id, status]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        operation_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/OperationStatus'
+        estimated_complete_at:
+          type: [string, 'null']
+          format: date-time
+
+    ApplyFixRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, message]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        message:
+          type: string
+          minLength: 1
+          maxLength: 4096
+
+    ApplyFixResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, applied]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        applied:
+          type: boolean
+        fixed_bug:
+          type: [string, 'null']
+          description: Публичный ID исправленного бага или null при несовпадении
+        message:
+          type: string
+
+    DeploymentStatus:
+      type: string
+      description: |
+        `locked` — предыдущий deployment ещё не завершён; `available` — текущая
+        задача, которую агент может запустить.
+      enum: [locked, available, queued, running, succeeded, failed]
+
+    Deployment:
+      type: object
+      additionalProperties: false
+      required: [deployment_id, sequence, name, status]
+      properties:
+        deployment_id:
+          type: string
+        sequence:
+          type: integer
+          minimum: 1
+          description: Позиция deployment в очереди задач
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: '#/components/schemas/DeploymentStatus'
+        operation_id:
+          type: [string, 'null']
+
+    DeploymentsResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, deployments]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        deployments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Deployment'
+
+    StartDeploymentRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, deployment_id]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        deployment_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    OperationResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - clock
+        - operation_id
+        - type
+        - status
+        - progress
+        - submitted_at
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        operation_id:
+          type: string
+        type:
+          type: string
+          enum: [scale_backend, deployment]
+        status:
+          $ref: '#/components/schemas/OperationStatus'
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+        submitted_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/ErrorResponse'
+            - type: 'null'
+
+    ProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, page]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        page:
+          $ref: '#/components/schemas/PageType'
+        product_id:
+          type: string
+          description: Обязателен для `product_page`; допустим для `purchase`
+
+    ProbeResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - clock
+        - request_id
+        - page
+        - status
+        - latency_ms
+        - load_units
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          type: string
+        page:
+          $ref: '#/components/schemas/PageType'
+        product_id:
+          type: [string, 'null']
+        status:
+          type: integer
+          enum: [200, 500]
+        latency_ms:
+          type: number
+          minimum: 0
+        load_units:
+          type: number
+          minimum: 0
+        error:
+          type: [string, 'null']
+        message:
+          type: [string, 'null']
+
+    EconomyResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - clock
+        - currency
+        - successful_purchases
+        - lost_purchases
+        - revenue_minor
+        - lost_revenue_minor
+        - server_cost_minor
+        - deployment_cost_minor
+        - balance_minor
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          examples: [USD]
+        successful_purchases:
+          type: integer
+          minimum: 0
+        lost_purchases:
+          type: integer
+          minimum: 0
+        revenue_minor:
+          type: integer
+        lost_revenue_minor:
+          type: integer
+          minimum: 0
+        server_cost_minor:
+          type: integer
+          minimum: 0
+        deployment_cost_minor:
+          type: integer
+          minimum: 0
+        balance_minor:
+          type: integer
+
+    AdvanceTimeRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, duration_seconds]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        duration_seconds:
+          type: integer
+          minimum: 300
+          description: Запрошенная прокрутка; минимум пять минут
+
+    AdvanceTimeResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - clock
+        - previous_simulation_time
+        - requested_duration_seconds
+        - processed_events
+        - new_logs
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        previous_simulation_time:
+          type: string
+          format: date-time
+        requested_duration_seconds:
+          type: integer
+          minimum: 300
+        processed_events:
+          type: integer
+          minimum: 0
+        new_logs:
+          type: integer
+          minimum: 0
+        logs_cursor:
+          type: [string, 'null']
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          examples: [RUN_NOT_FOUND]
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

@@ -1,0 +1,209 @@
+package spec_test
+
+import (
+	"testing"
+	"time"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation"
+	"github.com/aigizk/hackersprint2-sim/spec"
+)
+
+var worldStartsAt = time.Date(2030, time.January, 1, 10, 0, 0, 0, time.UTC)
+
+func TestWorldCreation(t *testing.T) {
+	s := spec.New(t, "run-create-world")
+	endsAt := worldStartsAt.Add(24 * time.Hour)
+
+	s.Given()
+
+	s.When(
+		s.World.Create(42, worldStartsAt, endsAt),
+	)
+
+	s.Then(
+		s.Events.Exactly(simulation.WorldCreated{
+			RunID:     "run-create-world",
+			Seed:      42,
+			StartedAt: worldStartsAt,
+			EndsAt:    endsAt,
+		}),
+		s.State.IsRunning(),
+		s.State.CurrentTime(worldStartsAt),
+		s.State.Version(1),
+	)
+}
+
+func TestProductAddition(t *testing.T) {
+	s := spec.New(t, "run-add-product")
+	endsAt := worldStartsAt.Add(24 * time.Hour)
+
+	s.Given(
+		s.World.Created(42, worldStartsAt, endsAt),
+	)
+
+	s.When(
+		s.Product.Add("coffee-1", "Coffee machine", 12_990, 850_000, 200_000),
+	)
+
+	s.Then(
+		s.Events.Exactly(simulation.ProductAdded{
+			ProductID:              "coffee-1",
+			Name:                   "Coffee machine",
+			PriceMinor:             12_990,
+			ViewProbabilityPPM:     850_000,
+			PurchaseProbabilityPPM: 200_000,
+			AddedAt:                worldStartsAt,
+		}),
+		s.State.HasProduct(simulation.ProductState{
+			ID:                     "coffee-1",
+			Name:                   "Coffee machine",
+			PriceMinor:             12_990,
+			ViewProbabilityPPM:     850_000,
+			PurchaseProbabilityPPM: 200_000,
+			AddedAt:                worldStartsAt,
+		}),
+		s.State.Version(2),
+	)
+}
+
+func TestProductPurchase(t *testing.T) {
+	s := spec.New(t, "run-purchase-product")
+	endsAt := worldStartsAt.Add(24 * time.Hour)
+
+	s.Given(
+		s.World.Created(42, worldStartsAt, endsAt),
+		s.Product.Added("coffee-1", "Coffee machine", 12_990, 850_000, 200_000),
+	)
+
+	s.When(
+		s.Product.Purchase("purchase-1", "coffee-1"),
+	)
+
+	s.Then(
+		s.Events.Exactly(simulation.ProductPurchased{
+			PurchaseID:  "purchase-1",
+			ProductID:   "coffee-1",
+			PriceMinor:  12_990,
+			PurchasedAt: worldStartsAt,
+		}),
+		s.State.Economy(12_990, 1),
+		s.State.Version(3),
+	)
+}
+
+func TestUnknownProductCannotBePurchased(t *testing.T) {
+	s := spec.New(t, "run-missing-product")
+
+	s.Given(
+		s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)),
+	)
+
+	s.WhenFails(
+		simulation.ErrProductNotFound,
+		s.Product.Purchase("purchase-1", "missing-product"),
+	)
+
+	s.Then(
+		s.Events.None(),
+		s.State.Economy(0, 0),
+		s.State.Version(1),
+	)
+}
+
+func TestPurchaseIDCannotBeAppliedTwice(t *testing.T) {
+	s := spec.New(t, "run-duplicate-purchase")
+
+	s.Given(
+		s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)),
+		s.Product.Added("coffee-1", "Coffee machine", 12_990, 850_000, 200_000),
+	)
+
+	s.When(
+		s.Product.Purchase("purchase-1", "coffee-1"),
+	)
+
+	s.WhenFails(
+		simulation.ErrPurchaseAlreadyExists,
+		s.Product.Purchase("purchase-1", "coffee-1"),
+	)
+
+	s.Then(
+		s.Events.None(),
+		s.State.Economy(12_990, 1),
+		s.State.Version(3),
+	)
+}
+
+func TestTimeAdvanceUsesMaximumOfRealAndRequestedTime(t *testing.T) {
+	s := spec.New(t, "run-advance-time")
+	endsAt := worldStartsAt.Add(24 * time.Hour)
+
+	s.Given(
+		s.World.Created(42, worldStartsAt, endsAt),
+	)
+
+	s.When(
+		s.Time.Advance(7*time.Minute, 5*time.Minute),
+	)
+
+	s.Then(
+		s.Events.Exactly(simulation.TimeAdvanced{
+			From:              worldStartsAt,
+			To:                worldStartsAt.Add(7 * time.Minute),
+			RealElapsed:       7 * time.Minute,
+			RequestedDuration: 5 * time.Minute,
+			AppliedDuration:   7 * time.Minute,
+		}),
+		s.State.CurrentTime(worldStartsAt.Add(7*time.Minute)),
+		s.State.IsRunning(),
+		s.State.Version(2),
+	)
+}
+
+func TestTimeAdvanceStopsAtEndOfWorld(t *testing.T) {
+	s := spec.New(t, "run-complete-world")
+	endsAt := worldStartsAt.Add(30 * time.Minute)
+
+	s.Given(
+		s.World.Created(42, worldStartsAt, endsAt),
+	)
+
+	s.When(
+		s.Time.Advance(5*time.Minute, 24*time.Hour),
+	)
+
+	s.Then(
+		s.Events.Exactly(simulation.TimeAdvanced{
+			From:              worldStartsAt,
+			To:                endsAt,
+			RealElapsed:       5 * time.Minute,
+			RequestedDuration: 24 * time.Hour,
+			AppliedDuration:   30 * time.Minute,
+		}),
+		s.State.CurrentTime(endsAt),
+		s.State.IsCompleted(),
+	)
+}
+
+func TestAutomaticTimeAdvanceMayBeLessThanFiveMinutes(t *testing.T) {
+	s := spec.New(t, "run-automatic-time")
+
+	s.Given(
+		s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)),
+	)
+
+	s.When(
+		s.Time.Advance(2*time.Minute, 0),
+	)
+
+	s.Then(
+		s.Events.Exactly(simulation.TimeAdvanced{
+			From:              worldStartsAt,
+			To:                worldStartsAt.Add(2 * time.Minute),
+			RealElapsed:       2 * time.Minute,
+			RequestedDuration: 0,
+			AppliedDuration:   2 * time.Minute,
+		}),
+		s.State.CurrentTime(worldStartsAt.Add(2*time.Minute)),
+	)
+}
