@@ -2,14 +2,17 @@
 
 ## Границы
 
-Первый реализованный срез поддерживает четыре доменные операции:
+Реализованный срез поддерживает следующие доменные операции:
 
 1. создание мира;
 2. добавление товара;
 3. покупка товара;
 4. продвижение симуляционного времени.
+5. открытие любой из трёх страниц;
+6. активация page bug и получение ответа `500`;
+7. построение site logs из request events.
 
-Для следующих срезов уже объявлены события посетителей, страниц, серверной нагрузки, bugs, deployments, operations, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
+Для следующих срезов уже объявлены остальные события посетителей, серверной нагрузки, fixes, deployments, operations, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
 
 ## Поток команды
 
@@ -42,7 +45,7 @@ not_created --WorldCreated--> running --TimeAdvanced(to EndsAt)--> completed
 | Состояние | Разрешённые события |
 |---|---|
 | `not_created` | `WorldCreated` |
-| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced` |
+| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced`, `PageBugActivated`, `PageRequestStarted`, `PageBugTriggered`, `PageRequestCompleted` |
 | `completed` | нет новых команд |
 
 ## События

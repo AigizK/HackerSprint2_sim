@@ -36,6 +36,14 @@ const (
 	FailureExternalProvider       RequestFailureCode = "EXTERNAL_PROVIDER_ERROR"
 )
 
+type PageRequestStatus string
+
+const (
+	PageRequestInProgress PageRequestStatus = "in_progress"
+	PageRequestSucceeded  PageRequestStatus = "succeeded"
+	PageRequestFailed     PageRequestStatus = "failed"
+)
+
 type RevenueLossReason string
 
 const (

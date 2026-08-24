@@ -1,6 +1,10 @@
 package simulation
 
-import "time"
+import (
+	"time"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
+)
 
 type Command interface {
 	commandType() string
@@ -37,3 +41,14 @@ type AdvanceTime struct {
 }
 
 func (AdvanceTime) commandType() string { return "AdvanceTime" }
+
+// OpenPage is intentionally not handled yet. The executable specifications
+// define its expected events and site-log projection before implementation.
+type OpenPage struct {
+	RequestID model.RequestID
+	VisitorID model.VisitorID
+	Page      model.PageType
+	ProductID model.ProductID
+}
+
+func (OpenPage) commandType() string { return "OpenPage" }

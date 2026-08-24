@@ -1,11 +1,15 @@
 package simulation
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
 func Rehydrate(records []StoredEvent) (State, error) {
@@ -113,9 +117,104 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			AppliedDuration:   applied,
 		}}, nil
 
+	case OpenPage:
+		if err := ensureRunning(state); err != nil {
+			return nil, err
+		}
+		if command.RequestID == "" || command.VisitorID == "" || !validPage(command.Page) {
+			return nil, fmt.Errorf("%w: invalid page request", ErrInvalidCommand)
+		}
+		if _, exists := state.Requests[command.RequestID]; exists {
+			return nil, fmt.Errorf("%w: request %q already exists", ErrInvalidCommand, command.RequestID)
+		}
+		if command.Page != model.PageProductList {
+			if _, exists := state.Products[command.ProductID]; !exists {
+				return nil, ErrProductNotFound
+			}
+		}
+
+		result := []events.Event{events.PageRequestStarted{
+			RequestID: command.RequestID,
+			Source:    model.RequestSourceVisitor,
+			VisitorID: command.VisitorID,
+			Page:      command.Page,
+			ProductID: command.ProductID,
+			StartedAt: state.Clock.CurrentTime,
+		}}
+
+		if bug, triggered := triggeredBug(state, command); triggered {
+			message := "чтоб этот баг пропал полностью, надо сделать фикс с текстом " + bug.FixMessage
+			result = append(result,
+				events.PageBugTriggered{
+					BugID:       bug.ID,
+					RequestID:   command.RequestID,
+					LogMessage:  message,
+					TriggeredAt: state.Clock.CurrentTime,
+				},
+				events.PageRequestCompleted{
+					RequestID:   command.RequestID,
+					StatusCode:  500,
+					ErrorCode:   model.FailurePageBug,
+					Message:     message,
+					CompletedAt: state.Clock.CurrentTime,
+				},
+			)
+			return result, nil
+		}
+
+		result = append(result, events.PageRequestCompleted{
+			RequestID:   command.RequestID,
+			StatusCode:  200,
+			CompletedAt: state.Clock.CurrentTime,
+		})
+		if command.Page == model.PagePurchase {
+			product := state.Products[command.ProductID]
+			result = append(result, events.ProductPurchased{
+				PurchaseID:  model.PurchaseID(command.RequestID),
+				ProductID:   product.ID,
+				PriceMinor:  product.PriceMinor,
+				PurchasedAt: state.Clock.CurrentTime,
+			})
+		}
+		return result, nil
+
 	default:
 		return nil, fmt.Errorf("%w: unsupported command %T", ErrInvalidCommand, command)
 	}
+}
+
+func validPage(page model.PageType) bool {
+	return page == model.PageProductList || page == model.PageProduct || page == model.PagePurchase
+}
+
+func triggeredBug(state State, command OpenPage) (BugState, bool) {
+	bugIDs := make([]string, 0, len(state.Bugs))
+	for id := range state.Bugs {
+		bugIDs = append(bugIDs, string(id))
+	}
+	sort.Strings(bugIDs)
+	for _, rawID := range bugIDs {
+		bug := state.Bugs[model.BugID(rawID)]
+		if bug.Page != command.Page || (bug.ProductID != "" && bug.ProductID != command.ProductID) {
+			continue
+		}
+		if probabilityHit(state.Seed, bug.ID, command.RequestID, bug.FailureProbabilityPPM) {
+			return bug, true
+		}
+	}
+	return BugState{}, false
+}
+
+func probabilityHit(seed int64, bugID model.BugID, requestID model.RequestID, probability uint32) bool {
+	if probability == 0 {
+		return false
+	}
+	if probability >= ProbabilityScale {
+		return true
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", seed, bugID, requestID)))
+	roll := binary.BigEndian.Uint64(digest[:8]) % uint64(ProbabilityScale)
+	return roll < uint64(probability)
 }
 
 func ensureRunning(state State) error {

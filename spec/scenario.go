@@ -2,6 +2,8 @@ package spec
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
@@ -10,6 +12,8 @@ import (
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/logs"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
 type Step func(*Scenario) error
@@ -23,12 +27,16 @@ type Scenario struct {
 	handler *simulation.Handler
 	engine  *simulation.Engine
 	emitted []events.Event
+	logs    []logs.Entry
 
 	World   WorldDSL
 	Product ProductDSL
+	User    UserDSL
+	Bug     BugDSL
 	Time    TimeDSL
 	State   StateDSL
 	Events  EventsDSL
+	Logs    LogsDSL
 }
 
 func New(t *testing.T, runID string) *Scenario {
@@ -46,9 +54,12 @@ func New(t *testing.T, runID string) *Scenario {
 	t.Cleanup(engine.Close)
 	s.World = WorldDSL{s: s}
 	s.Product = ProductDSL{s: s}
+	s.User = UserDSL{s: s}
+	s.Bug = BugDSL{s: s}
 	s.Time = TimeDSL{s: s}
 	s.State = StateDSL{s: s}
 	s.Events = EventsDSL{s: s}
+	s.Logs = LogsDSL{s: s}
 	return s
 }
 
@@ -104,12 +115,21 @@ func (s *Scenario) appendGiven(event events.Event) error {
 }
 
 func (s *Scenario) execute(command simulation.Command) error {
-	events, err := s.engine.Execute(s.ctx, s.runID, command)
+	emitted, err := s.engine.Execute(s.ctx, s.runID, command)
 	if err != nil {
 		return err
 	}
-	s.emitted = append(s.emitted, events...)
-	return nil
+	s.emitted = append(s.emitted, emitted...)
+	records, err := s.store.Load(s.ctx, s.runID)
+	if err != nil {
+		return err
+	}
+	stream := make([]events.Event, 0, len(records))
+	for _, record := range records {
+		stream = append(stream, record.Event)
+	}
+	s.logs, err = logs.Project(stream)
+	return err
 }
 
 func (s *Scenario) state() (simulation.State, error) {
@@ -179,6 +199,40 @@ func (d TimeDSL) Advance(realElapsed, requested time.Duration) Step {
 		return s.execute(simulation.AdvanceTime{
 			RealElapsed:       realElapsed,
 			RequestedDuration: requested,
+		})
+	}
+}
+
+type UserDSL struct{ s *Scenario }
+
+func (d UserDSL) OpensPage(requestID model.RequestID, visitorID model.VisitorID, page model.PageType, productID model.ProductID) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.OpenPage{
+			RequestID: requestID,
+			VisitorID: visitorID,
+			Page:      page,
+			ProductID: productID,
+		})
+	}
+}
+
+type BugDSL struct{ s *Scenario }
+
+func (d BugDSL) Activated(id model.BugID, page model.PageType, productID model.ProductID, failurePPM uint32, fixMessage string) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		fixMessageHash := sha256.Sum256([]byte(fixMessage))
+		return s.appendGiven(events.PageBugActivated{
+			BugID:                 id,
+			Page:                  page,
+			ProductID:             productID,
+			FailureProbabilityPPM: failurePPM,
+			FixMessage:            fixMessage,
+			FixMessageHash:        hex.EncodeToString(fixMessageHash[:]),
+			ActivatedAt:           state.Clock.CurrentTime,
 		})
 	}
 }
@@ -275,4 +329,15 @@ func (d EventsDSL) Exactly(want ...events.Event) Assertion {
 
 func (d EventsDSL) None() Assertion {
 	return d.Exactly()
+}
+
+type LogsDSL struct{ s *Scenario }
+
+func (d LogsDSL) Exactly(want ...logs.Entry) Assertion {
+	return func(s *Scenario) error {
+		if !reflect.DeepEqual(s.logs, want) {
+			return fmt.Errorf("site logs = %#v, want %#v", s.logs, want)
+		}
+		return nil
+	}
 }

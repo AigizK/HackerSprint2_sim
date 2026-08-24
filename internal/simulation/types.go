@@ -49,6 +49,31 @@ type PurchaseState struct {
 	PurchasedAt time.Time
 }
 
+type BugState struct {
+	ID                    model.BugID
+	Page                  model.PageType
+	ProductID             ProductID
+	FailureProbabilityPPM uint32
+	FixMessage            string
+	FixMessageHash        string
+	ActivatedAt           time.Time
+}
+
+type PageRequestState struct {
+	ID          model.RequestID
+	Source      model.RequestSource
+	VisitorID   model.VisitorID
+	Page        model.PageType
+	ProductID   ProductID
+	LoadUnits   int64
+	Status      model.PageRequestStatus
+	StatusCode  int
+	ErrorCode   model.RequestFailureCode
+	Message     string
+	StartedAt   time.Time
+	CompletedAt time.Time
+}
+
 type State struct {
 	RunID     string
 	Seed      int64
@@ -57,6 +82,8 @@ type State struct {
 	Clock     ClockState
 	Products  map[ProductID]ProductState
 	Purchases map[PurchaseID]PurchaseState
+	Bugs      map[model.BugID]BugState
+	Requests  map[model.RequestID]PageRequestState
 	Economy   EconomyState
 }
 
@@ -65,5 +92,7 @@ func NewState() State {
 		Status:    RunNotCreated,
 		Products:  make(map[ProductID]ProductState),
 		Purchases: make(map[PurchaseID]PurchaseState),
+		Bugs:      make(map[model.BugID]BugState),
+		Requests:  make(map[model.RequestID]PageRequestState),
 	}
 }

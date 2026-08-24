@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
 var (
@@ -125,6 +126,85 @@ func (s *State) Apply(event events.Event) error {
 		if event.To.Equal(s.Clock.EndsAt) {
 			s.Status = RunCompleted
 		}
+		return nil
+
+	case events.PageBugActivated:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.BugID == "" || event.FailureProbabilityPPM > ProbabilityScale ||
+			event.FixMessage == "" || event.FixMessageHash == "" || !event.ActivatedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid page bug event", ErrInvalidEvent)
+		}
+		if s.Bugs == nil {
+			s.Bugs = make(map[model.BugID]BugState)
+		}
+		if _, exists := s.Bugs[event.BugID]; exists {
+			return fmt.Errorf("%w: bug %q already exists", ErrInvalidEvent, event.BugID)
+		}
+		s.Bugs[event.BugID] = BugState{
+			ID:                    event.BugID,
+			Page:                  event.Page,
+			ProductID:             event.ProductID,
+			FailureProbabilityPPM: event.FailureProbabilityPPM,
+			FixMessage:            event.FixMessage,
+			FixMessageHash:        event.FixMessageHash,
+			ActivatedAt:           event.ActivatedAt,
+		}
+		return nil
+
+	case events.PageRequestStarted:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.RequestID == "" || event.VisitorID == "" || !event.StartedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid page request event", ErrInvalidEvent)
+		}
+		if s.Requests == nil {
+			s.Requests = make(map[model.RequestID]PageRequestState)
+		}
+		if _, exists := s.Requests[event.RequestID]; exists {
+			return fmt.Errorf("%w: request %q already exists", ErrInvalidEvent, event.RequestID)
+		}
+		s.Requests[event.RequestID] = PageRequestState{
+			ID:        event.RequestID,
+			Source:    event.Source,
+			VisitorID: event.VisitorID,
+			Page:      event.Page,
+			ProductID: event.ProductID,
+			LoadUnits: event.LoadUnits,
+			Status:    model.PageRequestInProgress,
+			StartedAt: event.StartedAt,
+		}
+		return nil
+
+	case events.PageBugTriggered:
+		if _, exists := s.Bugs[event.BugID]; !exists {
+			return fmt.Errorf("%w: bug %q does not exist", ErrInvalidEvent, event.BugID)
+		}
+		if _, exists := s.Requests[event.RequestID]; !exists {
+			return fmt.Errorf("%w: request %q does not exist", ErrInvalidEvent, event.RequestID)
+		}
+		return nil
+
+	case events.PageRequestCompleted:
+		request, exists := s.Requests[event.RequestID]
+		if !exists {
+			return fmt.Errorf("%w: request %q does not exist", ErrInvalidEvent, event.RequestID)
+		}
+		if request.Status != model.PageRequestInProgress || !event.CompletedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: request %q cannot be completed", ErrInvalidEvent, event.RequestID)
+		}
+		request.StatusCode = event.StatusCode
+		request.ErrorCode = event.ErrorCode
+		request.Message = event.Message
+		request.CompletedAt = event.CompletedAt
+		if event.StatusCode >= 200 && event.StatusCode < 300 {
+			request.Status = model.PageRequestSucceeded
+		} else {
+			request.Status = model.PageRequestFailed
+		}
+		s.Requests[event.RequestID] = request
 		return nil
 
 	default:

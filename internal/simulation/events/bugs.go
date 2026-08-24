@@ -7,6 +7,7 @@ type PageBugActivated struct {
 	Page                  PageType
 	ProductID             ProductID
 	FailureProbabilityPPM uint32
+	FixMessage            string
 	FixMessageHash        string
 	ActivatedAt           time.Time
 }
