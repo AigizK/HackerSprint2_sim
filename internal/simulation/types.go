@@ -56,7 +56,43 @@ type BugState struct {
 	FailureProbabilityPPM uint32
 	FixMessage            string
 	FixMessageHash        string
+	Status                model.BugStatus
 	ActivatedAt           time.Time
+	FixedAt               time.Time
+}
+
+type FixSubmissionState struct {
+	CommandID   model.CommandID
+	Message     string
+	Status      model.FixSubmissionStatus
+	BugID       model.BugID
+	SubmittedAt time.Time
+	CompletedAt time.Time
+}
+
+type PageConfigState struct {
+	Page         model.PageType
+	LoadUnits    int64
+	HoldDuration time.Duration
+	ConfiguredAt time.Time
+}
+
+type ServerState struct {
+	ID               model.ServerID
+	OperationID      model.OperationID
+	Status           model.ServerLifecycleStatus
+	CapacityUnits    int64
+	CostPerHourMinor int64
+	StartedAt        time.Time
+	ActivatedAt      time.Time
+}
+
+type CapacityAllocationState struct {
+	RequestID  model.RequestID
+	ServerID   model.ServerID
+	LoadUnits  int64
+	AcceptedAt time.Time
+	ReleasesAt time.Time
 }
 
 type PageRequestState struct {
@@ -70,6 +106,8 @@ type PageRequestState struct {
 	StatusCode  int
 	ErrorCode   model.RequestFailureCode
 	Message     string
+	ServerID    model.ServerID
+	ReleasesAt  time.Time
 	StartedAt   time.Time
 	CompletedAt time.Time
 }
@@ -83,6 +121,10 @@ type State struct {
 	Products  map[ProductID]ProductState
 	Purchases map[PurchaseID]PurchaseState
 	Bugs      map[model.BugID]BugState
+	Fixes     map[model.CommandID]FixSubmissionState
+	Pages     map[model.PageType]PageConfigState
+	Servers   map[model.ServerID]ServerState
+	Capacity  map[model.RequestID]CapacityAllocationState
 	Requests  map[model.RequestID]PageRequestState
 	Economy   EconomyState
 }
@@ -93,6 +135,10 @@ func NewState() State {
 		Products:  make(map[ProductID]ProductState),
 		Purchases: make(map[PurchaseID]PurchaseState),
 		Bugs:      make(map[model.BugID]BugState),
+		Fixes:     make(map[model.CommandID]FixSubmissionState),
+		Pages:     make(map[model.PageType]PageConfigState),
+		Servers:   make(map[model.ServerID]ServerState),
+		Capacity:  make(map[model.RequestID]CapacityAllocationState),
 		Requests:  make(map[model.RequestID]PageRequestState),
 	}
 }

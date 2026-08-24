@@ -42,8 +42,7 @@ type AdvanceTime struct {
 
 func (AdvanceTime) commandType() string { return "AdvanceTime" }
 
-// OpenPage is intentionally not handled yet. The executable specifications
-// define its expected events and site-log projection before implementation.
+// OpenPage executes a visitor request against the current page, bug and capacity state.
 type OpenPage struct {
 	RequestID model.RequestID
 	VisitorID model.VisitorID
@@ -52,3 +51,11 @@ type OpenPage struct {
 }
 
 func (OpenPage) commandType() string { return "OpenPage" }
+
+// ApplyFix submits a diagnostic message that may resolve an active page bug.
+type ApplyFix struct {
+	CommandID model.CommandID
+	Message   string
+}
+
+func (ApplyFix) commandType() string { return "ApplyFix" }

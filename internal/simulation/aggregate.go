@@ -132,6 +132,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 				return nil, ErrProductNotFound
 			}
 		}
+		pageConfig := state.Pages[command.Page]
 
 		result := []events.Event{events.PageRequestStarted{
 			RequestID: command.RequestID,
@@ -139,8 +140,30 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			VisitorID: command.VisitorID,
 			Page:      command.Page,
 			ProductID: command.ProductID,
+			LoadUnits: pageConfig.LoadUnits,
 			StartedAt: state.Clock.CurrentTime,
 		}}
+		serverID := model.ServerID("")
+		if pageConfig.LoadUnits > 0 {
+			server, available, accepted := selectServer(state, pageConfig.LoadUnits, state.Clock.CurrentTime)
+			if !accepted {
+				message := fmt.Sprintf("server capacity exceeded: required=%d available=%d", pageConfig.LoadUnits, available)
+				return append(result, events.PageRequestRejected{
+					RequestID:  command.RequestID,
+					StatusCode: 500,
+					ErrorCode:  model.FailureServerCapacityExceeded,
+					Message:    message,
+					RejectedAt: state.Clock.CurrentTime,
+				}), nil
+			}
+			serverID = server.ID
+			result = append(result, events.PageRequestAccepted{
+				RequestID:  command.RequestID,
+				ServerID:   server.ID,
+				AcceptedAt: state.Clock.CurrentTime,
+				ReleasesAt: state.Clock.CurrentTime.Add(pageConfig.HoldDuration),
+			})
+		}
 
 		if bug, triggered := triggeredBug(state, command); triggered {
 			message := "чтоб этот баг пропал полностью, надо сделать фикс с текстом " + bug.FixMessage
@@ -153,6 +176,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 				},
 				events.PageRequestCompleted{
 					RequestID:   command.RequestID,
+					ServerID:    serverID,
 					StatusCode:  500,
 					ErrorCode:   model.FailurePageBug,
 					Message:     message,
@@ -164,6 +188,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 
 		result = append(result, events.PageRequestCompleted{
 			RequestID:   command.RequestID,
+			ServerID:    serverID,
 			StatusCode:  200,
 			CompletedAt: state.Clock.CurrentTime,
 		})
@@ -178,6 +203,39 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		}
 		return result, nil
 
+	case ApplyFix:
+		if err := ensureRunning(state); err != nil {
+			return nil, err
+		}
+		if command.CommandID == "" || strings.TrimSpace(command.Message) == "" {
+			return nil, fmt.Errorf("%w: invalid fix command", ErrInvalidCommand)
+		}
+		if _, exists := state.Fixes[command.CommandID]; exists {
+			return nil, fmt.Errorf("%w: fix command %q already exists", ErrInvalidCommand, command.CommandID)
+		}
+
+		result := []events.Event{events.BugFixSubmitted{
+			CommandID:   command.CommandID,
+			Message:     command.Message,
+			SubmittedAt: state.Clock.CurrentTime,
+		}}
+		messageHash := sha256.Sum256([]byte(command.Message))
+		encodedHash := fmt.Sprintf("%x", messageHash)
+		for _, bug := range sortedActiveBugs(state) {
+			if bug.FixMessageHash == encodedHash {
+				return append(result, events.PageBugFixed{
+					CommandID: command.CommandID,
+					BugID:     bug.ID,
+					FixedAt:   state.Clock.CurrentTime,
+				}), nil
+			}
+		}
+		return append(result, events.BugFixRejected{
+			CommandID:  command.CommandID,
+			Reason:     "FIX_MESSAGE_DOES_NOT_MATCH",
+			RejectedAt: state.Clock.CurrentTime,
+		}), nil
+
 	default:
 		return nil, fmt.Errorf("%w: unsupported command %T", ErrInvalidCommand, command)
 	}
@@ -188,13 +246,7 @@ func validPage(page model.PageType) bool {
 }
 
 func triggeredBug(state State, command OpenPage) (BugState, bool) {
-	bugIDs := make([]string, 0, len(state.Bugs))
-	for id := range state.Bugs {
-		bugIDs = append(bugIDs, string(id))
-	}
-	sort.Strings(bugIDs)
-	for _, rawID := range bugIDs {
-		bug := state.Bugs[model.BugID(rawID)]
+	for _, bug := range sortedActiveBugs(state) {
 		if bug.Page != command.Page || (bug.ProductID != "" && bug.ProductID != command.ProductID) {
 			continue
 		}
@@ -203,6 +255,43 @@ func triggeredBug(state State, command OpenPage) (BugState, bool) {
 		}
 	}
 	return BugState{}, false
+}
+
+func sortedActiveBugs(state State) []BugState {
+	bugIDs := make([]string, 0, len(state.Bugs))
+	for id, bug := range state.Bugs {
+		if bug.Status == model.BugActive {
+			bugIDs = append(bugIDs, string(id))
+		}
+	}
+	sort.Strings(bugIDs)
+	bugs := make([]BugState, 0, len(bugIDs))
+	for _, rawID := range bugIDs {
+		bugs = append(bugs, state.Bugs[model.BugID(rawID)])
+	}
+	return bugs
+}
+
+func selectServer(state State, required int64, at time.Time) (ServerState, int64, bool) {
+	serverIDs := make([]string, 0, len(state.Servers))
+	for id, server := range state.Servers {
+		if server.Status == model.ServerActive {
+			serverIDs = append(serverIDs, string(id))
+		}
+	}
+	sort.Strings(serverIDs)
+	maxAvailable := int64(0)
+	for _, rawID := range serverIDs {
+		server := state.Servers[model.ServerID(rawID)]
+		available := serverAvailableCapacity(state, server.ID, at)
+		if available > maxAvailable {
+			maxAvailable = available
+		}
+		if available >= required {
+			return server, available, true
+		}
+	}
+	return ServerState{}, maxAvailable, false
 }
 
 func probabilityHit(seed int64, bugID model.BugID, requestID model.RequestID, probability uint32) bool {

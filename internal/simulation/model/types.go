@@ -44,6 +44,21 @@ const (
 	PageRequestFailed     PageRequestStatus = "failed"
 )
 
+type BugStatus string
+
+const (
+	BugActive BugStatus = "active"
+	BugFixed  BugStatus = "fixed"
+)
+
+type FixSubmissionStatus string
+
+const (
+	FixSubmitted FixSubmissionStatus = "submitted"
+	FixAccepted  FixSubmissionStatus = "accepted"
+	FixRejected  FixSubmissionStatus = "rejected"
+)
+
 type RevenueLossReason string
 
 const (

@@ -3,6 +3,7 @@ package simulation
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
@@ -128,6 +129,66 @@ func (s *State) Apply(event events.Event) error {
 		}
 		return nil
 
+	case events.PageConfigured:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if !validPage(event.Page) || event.LoadUnits <= 0 || event.HoldDuration <= 0 ||
+			!event.ConfiguredAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid page configuration", ErrInvalidEvent)
+		}
+		if s.Pages == nil {
+			s.Pages = make(map[model.PageType]PageConfigState)
+		}
+		if _, exists := s.Pages[event.Page]; exists {
+			return fmt.Errorf("%w: page %q is already configured", ErrInvalidEvent, event.Page)
+		}
+		s.Pages[event.Page] = PageConfigState{
+			Page:         event.Page,
+			LoadUnits:    event.LoadUnits,
+			HoldDuration: event.HoldDuration,
+			ConfiguredAt: event.ConfiguredAt,
+		}
+		return nil
+
+	case events.ServerProvisioningStarted:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.OperationID == "" || event.ServerID == "" || event.CapacityUnits <= 0 ||
+			event.CostPerHourMinor < 0 || !event.StartedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid server provisioning event", ErrInvalidEvent)
+		}
+		if s.Servers == nil {
+			s.Servers = make(map[model.ServerID]ServerState)
+		}
+		if _, exists := s.Servers[event.ServerID]; exists {
+			return fmt.Errorf("%w: server %q already exists", ErrInvalidEvent, event.ServerID)
+		}
+		s.Servers[event.ServerID] = ServerState{
+			ID:               event.ServerID,
+			OperationID:      event.OperationID,
+			Status:           model.ServerProvisioning,
+			CapacityUnits:    event.CapacityUnits,
+			CostPerHourMinor: event.CostPerHourMinor,
+			StartedAt:        event.StartedAt,
+		}
+		return nil
+
+	case events.ServerActivated:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		server, exists := s.Servers[event.ServerID]
+		if !exists || server.Status != model.ServerProvisioning || server.OperationID != event.OperationID ||
+			!event.ActivatedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: server %q cannot be activated", ErrInvalidEvent, event.ServerID)
+		}
+		server.Status = model.ServerActive
+		server.ActivatedAt = event.ActivatedAt
+		s.Servers[event.ServerID] = server
+		return nil
+
 	case events.PageBugActivated:
 		if err := ensureRunning(*s); err != nil {
 			return err
@@ -149,6 +210,7 @@ func (s *State) Apply(event events.Event) error {
 			FailureProbabilityPPM: event.FailureProbabilityPPM,
 			FixMessage:            event.FixMessage,
 			FixMessageHash:        event.FixMessageHash,
+			Status:                model.BugActive,
 			ActivatedAt:           event.ActivatedAt,
 		}
 		return nil
@@ -157,8 +219,11 @@ func (s *State) Apply(event events.Event) error {
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
-		if event.RequestID == "" || event.VisitorID == "" || !event.StartedAt.Equal(s.Clock.CurrentTime) {
+		if event.RequestID == "" || event.VisitorID == "" || event.LoadUnits < 0 || !event.StartedAt.Equal(s.Clock.CurrentTime) {
 			return fmt.Errorf("%w: invalid page request event", ErrInvalidEvent)
+		}
+		if page, configured := s.Pages[event.Page]; configured && event.LoadUnits != page.LoadUnits {
+			return fmt.Errorf("%w: request load does not match page configuration", ErrInvalidEvent)
 		}
 		if s.Requests == nil {
 			s.Requests = make(map[model.RequestID]PageRequestState)
@@ -178,9 +243,46 @@ func (s *State) Apply(event events.Event) error {
 		}
 		return nil
 
+	case events.PageRequestAccepted:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		request, exists := s.Requests[event.RequestID]
+		if !exists || request.Status != model.PageRequestInProgress || request.LoadUnits <= 0 {
+			return fmt.Errorf("%w: request %q cannot be accepted", ErrInvalidEvent, event.RequestID)
+		}
+		server, exists := s.Servers[event.ServerID]
+		if !exists || server.Status != model.ServerActive || !event.AcceptedAt.Equal(s.Clock.CurrentTime) ||
+			!event.ReleasesAt.After(event.AcceptedAt) {
+			return fmt.Errorf("%w: server %q cannot accept request", ErrInvalidEvent, event.ServerID)
+		}
+		page := s.Pages[request.Page]
+		if event.ReleasesAt != event.AcceptedAt.Add(page.HoldDuration) ||
+			serverAvailableCapacity(*s, server.ID, event.AcceptedAt) < request.LoadUnits {
+			return fmt.Errorf("%w: invalid capacity allocation for request %q", ErrInvalidEvent, event.RequestID)
+		}
+		if s.Capacity == nil {
+			s.Capacity = make(map[model.RequestID]CapacityAllocationState)
+		}
+		s.Capacity[event.RequestID] = CapacityAllocationState{
+			RequestID:  event.RequestID,
+			ServerID:   event.ServerID,
+			LoadUnits:  request.LoadUnits,
+			AcceptedAt: event.AcceptedAt,
+			ReleasesAt: event.ReleasesAt,
+		}
+		request.ServerID = event.ServerID
+		request.ReleasesAt = event.ReleasesAt
+		s.Requests[event.RequestID] = request
+		return nil
+
 	case events.PageBugTriggered:
-		if _, exists := s.Bugs[event.BugID]; !exists {
+		bug, exists := s.Bugs[event.BugID]
+		if !exists {
 			return fmt.Errorf("%w: bug %q does not exist", ErrInvalidEvent, event.BugID)
+		}
+		if bug.Status != model.BugActive {
+			return fmt.Errorf("%w: bug %q is not active", ErrInvalidEvent, event.BugID)
 		}
 		if _, exists := s.Requests[event.RequestID]; !exists {
 			return fmt.Errorf("%w: request %q does not exist", ErrInvalidEvent, event.RequestID)
@@ -192,7 +294,8 @@ func (s *State) Apply(event events.Event) error {
 		if !exists {
 			return fmt.Errorf("%w: request %q does not exist", ErrInvalidEvent, event.RequestID)
 		}
-		if request.Status != model.PageRequestInProgress || !event.CompletedAt.Equal(s.Clock.CurrentTime) {
+		if request.Status != model.PageRequestInProgress || !event.CompletedAt.Equal(s.Clock.CurrentTime) ||
+			(request.LoadUnits > 0 && event.ServerID != request.ServerID) {
 			return fmt.Errorf("%w: request %q cannot be completed", ErrInvalidEvent, event.RequestID)
 		}
 		request.StatusCode = event.StatusCode
@@ -207,7 +310,93 @@ func (s *State) Apply(event events.Event) error {
 		s.Requests[event.RequestID] = request
 		return nil
 
+	case events.PageRequestRejected:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		request, exists := s.Requests[event.RequestID]
+		if !exists || request.Status != model.PageRequestInProgress || event.StatusCode < 400 ||
+			event.ErrorCode == "" || !event.RejectedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: request %q cannot be rejected", ErrInvalidEvent, event.RequestID)
+		}
+		request.Status = model.PageRequestFailed
+		request.StatusCode = event.StatusCode
+		request.ErrorCode = event.ErrorCode
+		request.Message = event.Message
+		request.CompletedAt = event.RejectedAt
+		s.Requests[event.RequestID] = request
+		return nil
+
+	case events.BugFixSubmitted:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.CommandID == "" || event.Message == "" || !event.SubmittedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid fix submission", ErrInvalidEvent)
+		}
+		if s.Fixes == nil {
+			s.Fixes = make(map[model.CommandID]FixSubmissionState)
+		}
+		if _, exists := s.Fixes[event.CommandID]; exists {
+			return fmt.Errorf("%w: fix command %q already exists", ErrInvalidEvent, event.CommandID)
+		}
+		s.Fixes[event.CommandID] = FixSubmissionState{
+			CommandID:   event.CommandID,
+			Message:     event.Message,
+			Status:      model.FixSubmitted,
+			SubmittedAt: event.SubmittedAt,
+		}
+		return nil
+
+	case events.PageBugFixed:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		bug, exists := s.Bugs[event.BugID]
+		if !exists || bug.Status != model.BugActive {
+			return fmt.Errorf("%w: active bug %q does not exist", ErrInvalidEvent, event.BugID)
+		}
+		fix, exists := s.Fixes[event.CommandID]
+		if !exists || fix.Status != model.FixSubmitted || !event.FixedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: fix command %q cannot be accepted", ErrInvalidEvent, event.CommandID)
+		}
+		bug.Status = model.BugFixed
+		bug.FixedAt = event.FixedAt
+		s.Bugs[event.BugID] = bug
+		fix.Status = model.FixAccepted
+		fix.BugID = event.BugID
+		fix.CompletedAt = event.FixedAt
+		s.Fixes[event.CommandID] = fix
+		return nil
+
+	case events.BugFixRejected:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		fix, exists := s.Fixes[event.CommandID]
+		if !exists || fix.Status != model.FixSubmitted || event.Reason == "" || !event.RejectedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: fix command %q cannot be rejected", ErrInvalidEvent, event.CommandID)
+		}
+		fix.Status = model.FixRejected
+		fix.CompletedAt = event.RejectedAt
+		s.Fixes[event.CommandID] = fix
+		return nil
+
 	default:
 		return fmt.Errorf("%w: unsupported event %T", ErrInvalidEvent, event)
 	}
+}
+
+func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time) int64 {
+	server, exists := state.Servers[serverID]
+	if !exists || server.Status != model.ServerActive {
+		return 0
+	}
+	used := int64(0)
+	for _, allocation := range state.Capacity {
+		if allocation.ServerID == serverID && allocation.ReleasesAt.After(at) {
+			used += allocation.LoadUnits
+		}
+	}
+	return server.CapacityUnits - used
 }

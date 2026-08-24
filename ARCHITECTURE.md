@@ -7,12 +7,16 @@
 1. создание мира;
 2. добавление товара;
 3. покупка товара;
-4. продвижение симуляционного времени.
+4. продвижение симуляционного времени;
 5. открытие любой из трёх страниц;
 6. активация page bug и получение ответа `500`;
-7. построение site logs из request events.
+7. отправка правильного или неправильного fix для page bug;
+8. конфигурация нагрузки страниц и стартового backend-сервера;
+9. резервирование server capacity на время обработки запроса;
+10. отказ `SERVER_CAPACITY_EXCEEDED` и освобождение capacity по времени;
+11. построение site logs из request events.
 
-Для следующих срезов уже объявлены остальные события посетителей, серверной нагрузки, fixes, deployments, operations, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
+Для следующих срезов уже объявлены остальные события посетителей, динамического масштабирования серверов, deployments, operations, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
 
 ## Поток команды
 
@@ -45,7 +49,7 @@ not_created --WorldCreated--> running --TimeAdvanced(to EndsAt)--> completed
 | Состояние | Разрешённые события |
 |---|---|
 | `not_created` | `WorldCreated` |
-| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced`, `PageBugActivated`, `PageRequestStarted`, `PageBugTriggered`, `PageRequestCompleted` |
+| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced`, `PageConfigured`, `ServerProvisioningStarted`, `ServerActivated`, `PageRequestStarted`, `PageRequestAccepted`, `PageRequestRejected`, `PageBugActivated`, `PageBugTriggered`, `PageRequestCompleted`, `BugFixSubmitted`, `PageBugFixed`, `BugFixRejected` |
 | `completed` | нет новых команд |
 
 ## События

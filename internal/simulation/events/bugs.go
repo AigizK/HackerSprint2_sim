@@ -32,8 +32,9 @@ type BugFixSubmitted struct {
 func (BugFixSubmitted) EventType() string { return "BugFixSubmitted" }
 
 type PageBugFixed struct {
-	BugID   BugID
-	FixedAt time.Time
+	CommandID CommandID
+	BugID     BugID
+	FixedAt   time.Time
 }
 
 func (PageBugFixed) EventType() string { return "PageBugFixed" }

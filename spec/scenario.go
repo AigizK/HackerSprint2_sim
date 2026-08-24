@@ -31,6 +31,8 @@ type Scenario struct {
 
 	World   WorldDSL
 	Product ProductDSL
+	Page    PageDSL
+	Server  ServerDSL
 	User    UserDSL
 	Bug     BugDSL
 	Time    TimeDSL
@@ -54,6 +56,8 @@ func New(t *testing.T, runID string) *Scenario {
 	t.Cleanup(engine.Close)
 	s.World = WorldDSL{s: s}
 	s.Product = ProductDSL{s: s}
+	s.Page = PageDSL{s: s}
+	s.Server = ServerDSL{s: s}
 	s.User = UserDSL{s: s}
 	s.Bug = BugDSL{s: s}
 	s.Time = TimeDSL{s: s}
@@ -192,6 +196,49 @@ func (d ProductDSL) Purchase(purchaseID simulation.PurchaseID, productID simulat
 	}
 }
 
+type PageDSL struct{ s *Scenario }
+
+func (d PageDSL) Configured(page model.PageType, loadUnits int64, holdDuration time.Duration) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.PageConfigured{
+			Page:         page,
+			LoadUnits:    loadUnits,
+			HoldDuration: holdDuration,
+			ConfiguredAt: state.Clock.CurrentTime,
+		})
+	}
+}
+
+type ServerDSL struct{ s *Scenario }
+
+func (d ServerDSL) Active(id model.ServerID, capacityUnits, costPerHourMinor int64) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		operationID := model.OperationID("initial-" + string(id))
+		if err := s.appendGiven(events.ServerProvisioningStarted{
+			OperationID:      operationID,
+			ServerID:         id,
+			CapacityUnits:    capacityUnits,
+			CostPerHourMinor: costPerHourMinor,
+			StartedAt:        state.Clock.CurrentTime,
+		}); err != nil {
+			return err
+		}
+		return s.appendGiven(events.ServerActivated{
+			OperationID: operationID,
+			ServerID:    id,
+			ActivatedAt: state.Clock.CurrentTime,
+		})
+	}
+}
+
 type TimeDSL struct{ s *Scenario }
 
 func (d TimeDSL) Advance(realElapsed, requested time.Duration) Step {
@@ -233,6 +280,15 @@ func (d BugDSL) Activated(id model.BugID, page model.PageType, productID model.P
 			FixMessage:            fixMessage,
 			FixMessageHash:        hex.EncodeToString(fixMessageHash[:]),
 			ActivatedAt:           state.Clock.CurrentTime,
+		})
+	}
+}
+
+func (d BugDSL) Fix(commandID model.CommandID, message string) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.ApplyFix{
+			CommandID: commandID,
+			Message:   message,
 		})
 	}
 }
