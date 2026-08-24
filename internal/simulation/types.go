@@ -1,6 +1,10 @@
 package simulation
 
-import "time"
+import (
+	"time"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
+)
 
 const (
 	ProbabilityScale   uint32        = 1_000_000
@@ -15,8 +19,8 @@ const (
 	RunCompleted  RunStatus = "completed"
 )
 
-type ProductID string
-type PurchaseID string
+type ProductID = model.ProductID
+type PurchaseID = model.PurchaseID
 
 type ClockState struct {
 	StartedAt   time.Time

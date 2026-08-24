@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/spec"
 )
 
@@ -21,7 +22,7 @@ func TestWorldCreation(t *testing.T) {
 	)
 
 	s.Then(
-		s.Events.Exactly(simulation.WorldCreated{
+		s.Events.Exactly(events.WorldCreated{
 			RunID:     "run-create-world",
 			Seed:      42,
 			StartedAt: worldStartsAt,
@@ -46,7 +47,7 @@ func TestProductAddition(t *testing.T) {
 	)
 
 	s.Then(
-		s.Events.Exactly(simulation.ProductAdded{
+		s.Events.Exactly(events.ProductAdded{
 			ProductID:              "coffee-1",
 			Name:                   "Coffee machine",
 			PriceMinor:             12_990,
@@ -80,7 +81,7 @@ func TestProductPurchase(t *testing.T) {
 	)
 
 	s.Then(
-		s.Events.Exactly(simulation.ProductPurchased{
+		s.Events.Exactly(events.ProductPurchased{
 			PurchaseID:  "purchase-1",
 			ProductID:   "coffee-1",
 			PriceMinor:  12_990,
@@ -147,7 +148,7 @@ func TestTimeAdvanceUsesMaximumOfRealAndRequestedTime(t *testing.T) {
 	)
 
 	s.Then(
-		s.Events.Exactly(simulation.TimeAdvanced{
+		s.Events.Exactly(events.TimeAdvanced{
 			From:              worldStartsAt,
 			To:                worldStartsAt.Add(7 * time.Minute),
 			RealElapsed:       7 * time.Minute,
@@ -173,7 +174,7 @@ func TestTimeAdvanceStopsAtEndOfWorld(t *testing.T) {
 	)
 
 	s.Then(
-		s.Events.Exactly(simulation.TimeAdvanced{
+		s.Events.Exactly(events.TimeAdvanced{
 			From:              worldStartsAt,
 			To:                endsAt,
 			RealElapsed:       5 * time.Minute,
@@ -197,7 +198,7 @@ func TestAutomaticTimeAdvanceMayBeLessThanFiveMinutes(t *testing.T) {
 	)
 
 	s.Then(
-		s.Events.Exactly(simulation.TimeAdvanced{
+		s.Events.Exactly(events.TimeAdvanced{
 			From:              worldStartsAt,
 			To:                worldStartsAt.Add(2 * time.Minute),
 			RealElapsed:       2 * time.Minute,

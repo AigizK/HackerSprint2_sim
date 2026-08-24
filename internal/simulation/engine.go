@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 )
 
 var ErrEngineClosed = errors.New("simulation engine closed")
@@ -15,7 +17,7 @@ type commandRequest struct {
 }
 
 type commandResult struct {
-	events []Event
+	events []events.Event
 	err    error
 }
 
@@ -45,7 +47,7 @@ func NewEngine(store EventStore) *Engine {
 	}
 }
 
-func (e *Engine) Execute(ctx context.Context, runID string, command Command) ([]Event, error) {
+func (e *Engine) Execute(ctx context.Context, runID string, command Command) ([]events.Event, error) {
 	worker, err := e.worker(runID)
 	if err != nil {
 		return nil, err

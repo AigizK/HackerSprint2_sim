@@ -1,6 +1,10 @@
 package simulation
 
-import "context"
+import (
+	"context"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
+)
 
 type Handler struct {
 	store EventStore
@@ -10,7 +14,7 @@ func NewHandler(store EventStore) *Handler {
 	return &Handler{store: store}
 }
 
-func (h *Handler) Execute(ctx context.Context, runID string, command Command) ([]Event, error) {
+func (h *Handler) Execute(ctx context.Context, runID string, command Command) ([]events.Event, error) {
 	records, err := h.store.Load(ctx, runID)
 	if err != nil {
 		return nil, err

@@ -5,13 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 )
 
 var ErrVersionConflict = errors.New("event stream version conflict")
 
 type EventStore interface {
 	Load(ctx context.Context, runID string) ([]StoredEvent, error)
-	Append(ctx context.Context, runID string, expectedVersion uint64, events []Event) ([]StoredEvent, error)
+	Append(ctx context.Context, runID string, expectedVersion uint64, newEvents []events.Event) ([]StoredEvent, error)
 }
 
 type MemoryEventStore struct {
@@ -31,7 +33,7 @@ func (s *MemoryEventStore) Load(_ context.Context, runID string) ([]StoredEvent,
 	return append([]StoredEvent(nil), records...), nil
 }
 
-func (s *MemoryEventStore) Append(_ context.Context, runID string, expectedVersion uint64, events []Event) ([]StoredEvent, error) {
+func (s *MemoryEventStore) Append(_ context.Context, runID string, expectedVersion uint64, newEvents []events.Event) ([]StoredEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -40,8 +42,8 @@ func (s *MemoryEventStore) Append(_ context.Context, runID string, expectedVersi
 		return nil, fmt.Errorf("%w: expected %d, actual %d", ErrVersionConflict, expectedVersion, len(stream))
 	}
 
-	appended := make([]StoredEvent, 0, len(events))
-	for _, event := range events {
+	appended := make([]StoredEvent, 0, len(newEvents))
+	for _, event := range newEvents {
 		record := StoredEvent{
 			Version: uint64(len(stream)) + 1,
 			Event:   event,

@@ -1,4 +1,4 @@
-package simulation
+package events
 
 import "time"
 
@@ -44,8 +44,3 @@ type TimeAdvanced struct {
 }
 
 func (TimeAdvanced) EventType() string { return "TimeAdvanced" }
-
-type StoredEvent struct {
-	Version uint64
-	Event   Event
-}

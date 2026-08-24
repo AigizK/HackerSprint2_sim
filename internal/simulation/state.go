@@ -3,6 +3,8 @@ package simulation
 import (
 	"errors"
 	"fmt"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 )
 
 var (
@@ -16,9 +18,9 @@ var (
 	ErrInvalidEvent          = errors.New("invalid event")
 )
 
-func (s *State) Apply(event Event) error {
+func (s *State) Apply(event events.Event) error {
 	switch event := event.(type) {
-	case WorldCreated:
+	case events.WorldCreated:
 		if s.Status != RunNotCreated {
 			return ErrWorldAlreadyCreated
 		}
@@ -41,7 +43,7 @@ func (s *State) Apply(event Event) error {
 		}
 		return nil
 
-	case ProductAdded:
+	case events.ProductAdded:
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
@@ -71,7 +73,7 @@ func (s *State) Apply(event Event) error {
 		}
 		return nil
 
-	case ProductPurchased:
+	case events.ProductPurchased:
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
@@ -95,7 +97,7 @@ func (s *State) Apply(event Event) error {
 		s.Economy.SuccessfulPurchases++
 		return nil
 
-	case TimeAdvanced:
+	case events.TimeAdvanced:
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}

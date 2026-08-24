@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 )
 
 type Step func(*Scenario) error
@@ -21,7 +22,7 @@ type Scenario struct {
 	store   *simulation.MemoryEventStore
 	handler *simulation.Handler
 	engine  *simulation.Engine
-	emitted []simulation.Event
+	emitted []events.Event
 
 	World   WorldDSL
 	Product ProductDSL
@@ -89,12 +90,12 @@ func (s *Scenario) Then(assertions ...Assertion) {
 	}
 }
 
-func (s *Scenario) appendGiven(event simulation.Event) error {
+func (s *Scenario) appendGiven(event events.Event) error {
 	records, err := s.store.Load(s.ctx, s.runID)
 	if err != nil {
 		return err
 	}
-	_, err = s.store.Append(s.ctx, s.runID, uint64(len(records)), []simulation.Event{event})
+	_, err = s.store.Append(s.ctx, s.runID, uint64(len(records)), []events.Event{event})
 	if err != nil {
 		return err
 	}
@@ -119,7 +120,7 @@ type WorldDSL struct{ s *Scenario }
 
 func (d WorldDSL) Created(seed int64, startedAt, endsAt time.Time) Step {
 	return func(s *Scenario) error {
-		return s.appendGiven(simulation.WorldCreated{
+		return s.appendGiven(events.WorldCreated{
 			RunID:     s.runID,
 			Seed:      seed,
 			StartedAt: startedAt,
@@ -142,7 +143,7 @@ func (d ProductDSL) Added(id simulation.ProductID, name string, priceMinor int64
 		if err != nil {
 			return err
 		}
-		return s.appendGiven(simulation.ProductAdded{
+		return s.appendGiven(events.ProductAdded{
 			ProductID:              id,
 			Name:                   name,
 			PriceMinor:             priceMinor,
@@ -263,7 +264,7 @@ func (d StateDSL) Version(want uint64) Assertion {
 
 type EventsDSL struct{ s *Scenario }
 
-func (d EventsDSL) Exactly(want ...simulation.Event) Assertion {
+func (d EventsDSL) Exactly(want ...events.Event) Assertion {
 	return func(s *Scenario) error {
 		if !reflect.DeepEqual(s.emitted, want) {
 			return fmt.Errorf("emitted events = %#v, want %#v", s.emitted, want)

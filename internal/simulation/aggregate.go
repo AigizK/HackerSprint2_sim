@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 )
 
 func Rehydrate(records []StoredEvent) (State, error) {
@@ -20,7 +22,7 @@ func Rehydrate(records []StoredEvent) (State, error) {
 	return state, nil
 }
 
-func Decide(runID string, state State, command Command) ([]Event, error) {
+func Decide(runID string, state State, command Command) ([]events.Event, error) {
 	switch command := command.(type) {
 	case CreateWorld:
 		if state.Status != RunNotCreated {
@@ -29,7 +31,7 @@ func Decide(runID string, state State, command Command) ([]Event, error) {
 		if runID == "" || command.Seed == 0 || command.StartedAt.IsZero() || !command.EndsAt.After(command.StartedAt) {
 			return nil, fmt.Errorf("%w: invalid world parameters", ErrInvalidCommand)
 		}
-		return []Event{WorldCreated{
+		return []events.Event{events.WorldCreated{
 			RunID:     runID,
 			Seed:      command.Seed,
 			StartedAt: command.StartedAt,
@@ -57,7 +59,7 @@ func Decide(runID string, state State, command Command) ([]Event, error) {
 		if _, exists := state.Products[command.ProductID]; exists {
 			return nil, ErrProductAlreadyExists
 		}
-		return []Event{ProductAdded{
+		return []events.Event{events.ProductAdded{
 			ProductID:              command.ProductID,
 			Name:                   command.Name,
 			PriceMinor:             command.PriceMinor,
@@ -80,7 +82,7 @@ func Decide(runID string, state State, command Command) ([]Event, error) {
 		if !exists {
 			return nil, ErrProductNotFound
 		}
-		return []Event{ProductPurchased{
+		return []events.Event{events.ProductPurchased{
 			PurchaseID:  command.PurchaseID,
 			ProductID:   product.ID,
 			PriceMinor:  product.PriceMinor,
@@ -103,7 +105,7 @@ func Decide(runID string, state State, command Command) ([]Event, error) {
 		if applied > remaining {
 			applied = remaining
 		}
-		return []Event{TimeAdvanced{
+		return []events.Event{events.TimeAdvanced{
 			From:              state.Clock.CurrentTime,
 			To:                state.Clock.CurrentTime.Add(applied),
 			RealElapsed:       command.RealElapsed,
