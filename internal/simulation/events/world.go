@@ -12,6 +12,13 @@ type PageConfigured struct {
 
 func (PageConfigured) EventType() string { return "PageConfigured" }
 
+type InfrastructureConfigured struct {
+	ServerProvisioningDuration time.Duration
+	ConfiguredAt               time.Time
+}
+
+func (InfrastructureConfigured) EventType() string { return "InfrastructureConfigured" }
+
 type RunEnded struct {
 	CompletedAt time.Time
 	Reason      string

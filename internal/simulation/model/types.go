@@ -87,6 +87,15 @@ const (
 	OperationDeployment   OperationKind = "deployment"
 )
 
+type OperationLifecycleStatus string
+
+const (
+	OperationStatusQueued    OperationLifecycleStatus = "queued"
+	OperationStatusRunning   OperationLifecycleStatus = "running"
+	OperationStatusSucceeded OperationLifecycleStatus = "succeeded"
+	OperationStatusFailed    OperationLifecycleStatus = "failed"
+)
+
 type ServerLifecycleStatus string
 
 const (

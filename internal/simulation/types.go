@@ -77,6 +77,11 @@ type PageConfigState struct {
 	ConfiguredAt time.Time
 }
 
+type InfrastructureConfigState struct {
+	ServerProvisioningDuration time.Duration
+	ConfiguredAt               time.Time
+}
+
 type ServerState struct {
 	ID               model.ServerID
 	OperationID      model.OperationID
@@ -84,6 +89,7 @@ type ServerState struct {
 	CapacityUnits    int64
 	CostPerHourMinor int64
 	StartedAt        time.Time
+	ReadyAt          time.Time
 	ActivatedAt      time.Time
 }
 
@@ -93,6 +99,15 @@ type CapacityAllocationState struct {
 	LoadUnits  int64
 	AcceptedAt time.Time
 	ReleasesAt time.Time
+}
+
+type OperationState struct {
+	ID          model.OperationID
+	Kind        model.OperationKind
+	Status      model.OperationLifecycleStatus
+	QueuedAt    time.Time
+	StartedAt   time.Time
+	CompletedAt time.Time
 }
 
 type PageRequestState struct {
@@ -113,32 +128,37 @@ type PageRequestState struct {
 }
 
 type State struct {
-	RunID     string
-	Seed      int64
-	Status    RunStatus
-	Version   uint64
-	Clock     ClockState
-	Products  map[ProductID]ProductState
-	Purchases map[PurchaseID]PurchaseState
-	Bugs      map[model.BugID]BugState
-	Fixes     map[model.CommandID]FixSubmissionState
-	Pages     map[model.PageType]PageConfigState
-	Servers   map[model.ServerID]ServerState
-	Capacity  map[model.RequestID]CapacityAllocationState
-	Requests  map[model.RequestID]PageRequestState
-	Economy   EconomyState
+	RunID          string
+	Seed           int64
+	Status         RunStatus
+	Version        uint64
+	Clock          ClockState
+	Infrastructure InfrastructureConfigState
+	Products       map[ProductID]ProductState
+	Purchases      map[PurchaseID]PurchaseState
+	Bugs           map[model.BugID]BugState
+	Fixes          map[model.CommandID]FixSubmissionState
+	Pages          map[model.PageType]PageConfigState
+	Servers        map[model.ServerID]ServerState
+	Capacity       map[model.RequestID]CapacityAllocationState
+	Operations     map[model.OperationID]OperationState
+	Commands       map[model.CommandID]model.OperationID
+	Requests       map[model.RequestID]PageRequestState
+	Economy        EconomyState
 }
 
 func NewState() State {
 	return State{
-		Status:    RunNotCreated,
-		Products:  make(map[ProductID]ProductState),
-		Purchases: make(map[PurchaseID]PurchaseState),
-		Bugs:      make(map[model.BugID]BugState),
-		Fixes:     make(map[model.CommandID]FixSubmissionState),
-		Pages:     make(map[model.PageType]PageConfigState),
-		Servers:   make(map[model.ServerID]ServerState),
-		Capacity:  make(map[model.RequestID]CapacityAllocationState),
-		Requests:  make(map[model.RequestID]PageRequestState),
+		Status:     RunNotCreated,
+		Products:   make(map[ProductID]ProductState),
+		Purchases:  make(map[PurchaseID]PurchaseState),
+		Bugs:       make(map[model.BugID]BugState),
+		Fixes:      make(map[model.CommandID]FixSubmissionState),
+		Pages:      make(map[model.PageType]PageConfigState),
+		Servers:    make(map[model.ServerID]ServerState),
+		Capacity:   make(map[model.RequestID]CapacityAllocationState),
+		Operations: make(map[model.OperationID]OperationState),
+		Commands:   make(map[model.CommandID]model.OperationID),
+		Requests:   make(map[model.RequestID]PageRequestState),
 	}
 }

@@ -151,12 +151,90 @@ func (s *State) Apply(event events.Event) error {
 		}
 		return nil
 
+	case events.InfrastructureConfigured:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.ServerProvisioningDuration <= 0 || !event.ConfiguredAt.Equal(s.Clock.CurrentTime) ||
+			s.Infrastructure.ServerProvisioningDuration > 0 {
+			return fmt.Errorf("%w: invalid infrastructure configuration", ErrInvalidEvent)
+		}
+		s.Infrastructure = InfrastructureConfigState{
+			ServerProvisioningDuration: event.ServerProvisioningDuration,
+			ConfiguredAt:               event.ConfiguredAt,
+		}
+		return nil
+
+	case events.BackendScaleRequested:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.CommandID == "" || event.OperationID == "" || event.DesiredInstances < 0 ||
+			!event.RequestedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid backend scale request", ErrInvalidEvent)
+		}
+		if s.Commands == nil {
+			s.Commands = make(map[model.CommandID]model.OperationID)
+		}
+		if _, exists := s.Commands[event.CommandID]; exists {
+			return fmt.Errorf("%w: command %q already exists", ErrInvalidEvent, event.CommandID)
+		}
+		s.Commands[event.CommandID] = event.OperationID
+		return nil
+
+	case events.OperationQueued:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.OperationID == "" || event.Kind == "" || !event.QueuedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid queued operation", ErrInvalidEvent)
+		}
+		if s.Operations == nil {
+			s.Operations = make(map[model.OperationID]OperationState)
+		}
+		if _, exists := s.Operations[event.OperationID]; exists {
+			return fmt.Errorf("%w: operation %q already exists", ErrInvalidEvent, event.OperationID)
+		}
+		s.Operations[event.OperationID] = OperationState{
+			ID:       event.OperationID,
+			Kind:     event.Kind,
+			Status:   model.OperationStatusQueued,
+			QueuedAt: event.QueuedAt,
+		}
+		return nil
+
+	case events.OperationStarted:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		operation, exists := s.Operations[event.OperationID]
+		if !exists || operation.Status != model.OperationStatusQueued || !event.StartedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: operation %q cannot be started", ErrInvalidEvent, event.OperationID)
+		}
+		operation.Status = model.OperationStatusRunning
+		operation.StartedAt = event.StartedAt
+		s.Operations[event.OperationID] = operation
+		return nil
+
+	case events.OperationSucceeded:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		operation, exists := s.Operations[event.OperationID]
+		if !exists || operation.Status != model.OperationStatusRunning || !event.CompletedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: operation %q cannot succeed", ErrInvalidEvent, event.OperationID)
+		}
+		operation.Status = model.OperationStatusSucceeded
+		operation.CompletedAt = event.CompletedAt
+		s.Operations[event.OperationID] = operation
+		return nil
+
 	case events.ServerProvisioningStarted:
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
 		if event.OperationID == "" || event.ServerID == "" || event.CapacityUnits <= 0 ||
-			event.CostPerHourMinor < 0 || !event.StartedAt.Equal(s.Clock.CurrentTime) {
+			event.CostPerHourMinor < 0 || !event.StartedAt.Equal(s.Clock.CurrentTime) || event.ReadyAt.Before(event.StartedAt) {
 			return fmt.Errorf("%w: invalid server provisioning event", ErrInvalidEvent)
 		}
 		if s.Servers == nil {
@@ -172,21 +250,49 @@ func (s *State) Apply(event events.Event) error {
 			CapacityUnits:    event.CapacityUnits,
 			CostPerHourMinor: event.CostPerHourMinor,
 			StartedAt:        event.StartedAt,
+			ReadyAt:          event.ReadyAt,
 		}
 		return nil
 
 	case events.ServerActivated:
-		if err := ensureRunning(*s); err != nil {
+		if err := ensureRunExists(*s); err != nil {
 			return err
 		}
 		server, exists := s.Servers[event.ServerID]
 		if !exists || server.Status != model.ServerProvisioning || server.OperationID != event.OperationID ||
-			!event.ActivatedAt.Equal(s.Clock.CurrentTime) {
+			!event.ActivatedAt.Equal(s.Clock.CurrentTime) || event.ActivatedAt.Before(server.ReadyAt) {
 			return fmt.Errorf("%w: server %q cannot be activated", ErrInvalidEvent, event.ServerID)
 		}
 		server.Status = model.ServerActive
 		server.ActivatedAt = event.ActivatedAt
 		s.Servers[event.ServerID] = server
+		return nil
+
+	case events.ServerDrainingStarted:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		server, exists := s.Servers[event.ServerID]
+		operation, operationExists := s.Operations[event.OperationID]
+		if !exists || server.Status != model.ServerActive || !operationExists ||
+			operation.Status != model.OperationStatusRunning || !event.StartedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: server %q cannot start draining", ErrInvalidEvent, event.ServerID)
+		}
+		server.Status = model.ServerDraining
+		server.OperationID = event.OperationID
+		s.Servers[event.ServerID] = server
+		return nil
+
+	case events.ServerRemoved:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		server, exists := s.Servers[event.ServerID]
+		if !exists || server.Status != model.ServerDraining || server.OperationID != event.OperationID ||
+			!event.RemovedAt.Equal(s.Clock.CurrentTime) || serverHasLoad(*s, event.ServerID, event.RemovedAt) {
+			return fmt.Errorf("%w: server %q cannot be removed", ErrInvalidEvent, event.ServerID)
+		}
+		delete(s.Servers, event.ServerID)
 		return nil
 
 	case events.PageBugActivated:
@@ -399,4 +505,20 @@ func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time)
 		}
 	}
 	return server.CapacityUnits - used
+}
+
+func serverHasLoad(state State, serverID model.ServerID, at time.Time) bool {
+	for _, allocation := range state.Capacity {
+		if allocation.ServerID == serverID && allocation.ReleasesAt.After(at) {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureRunExists(state State) error {
+	if state.Status == RunNotCreated {
+		return ErrWorldNotCreated
+	}
+	return nil
 }

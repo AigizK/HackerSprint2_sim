@@ -59,3 +59,21 @@ type ApplyFix struct {
 }
 
 func (ApplyFix) commandType() string { return "ApplyFix" }
+
+type AddServer struct {
+	CommandID        model.CommandID
+	OperationID      model.OperationID
+	ServerID         model.ServerID
+	CapacityUnits    int64
+	CostPerHourMinor int64
+}
+
+func (AddServer) commandType() string { return "AddServer" }
+
+type RemoveServer struct {
+	CommandID   model.CommandID
+	OperationID model.OperationID
+	ServerID    model.ServerID
+}
+
+func (RemoveServer) commandType() string { return "RemoveServer" }

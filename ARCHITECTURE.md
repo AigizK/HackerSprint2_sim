@@ -14,9 +14,12 @@
 8. конфигурация нагрузки страниц и стартового backend-сервера;
 9. резервирование server capacity на время обработки запроса;
 10. отказ `SERVER_CAPACITY_EXCEEDED` и освобождение capacity по времени;
-11. построение site logs из request events.
+11. отложенное добавление backend-сервера через provisioning operation;
+12. немедленное удаление свободного сервера;
+13. draining и отложенное удаление занятого сервера;
+14. построение site logs из request events.
 
-Для следующих срезов уже объявлены остальные события посетителей, динамического масштабирования серверов, deployments, operations, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
+Для следующих срезов уже объявлены остальные события посетителей, deployments, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
 
 ## Поток команды
 
@@ -31,6 +34,8 @@ Command
 ```
 
 События являются единственным источником истины. `State` не сохраняется как authoritative record и всегда может быть восстановлен replay. Snapshot в будущем будет только оптимизацией.
+
+Продолжительность создания сервера задаётся событием `InfrastructureConfigured`. После команды добавления сервер имеет статус `provisioning` и не участвует в capacity до `ReadyAt`. Пересекающий `ReadyAt` вызов `AdvanceTime` создаёт `ServerActivated` и `OperationSucceeded`.
 
 ## Параллелизм
 
@@ -49,7 +54,7 @@ not_created --WorldCreated--> running --TimeAdvanced(to EndsAt)--> completed
 | Состояние | Разрешённые события |
 |---|---|
 | `not_created` | `WorldCreated` |
-| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced`, `PageConfigured`, `ServerProvisioningStarted`, `ServerActivated`, `PageRequestStarted`, `PageRequestAccepted`, `PageRequestRejected`, `PageBugActivated`, `PageBugTriggered`, `PageRequestCompleted`, `BugFixSubmitted`, `PageBugFixed`, `BugFixRejected` |
+| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced`, `PageConfigured`, `InfrastructureConfigured`, `BackendScaleRequested`, `OperationQueued`, `OperationStarted`, `OperationSucceeded`, `ServerProvisioningStarted`, `ServerActivated`, `ServerDrainingStarted`, `ServerRemoved`, `PageRequestStarted`, `PageRequestAccepted`, `PageRequestRejected`, `PageBugActivated`, `PageBugTriggered`, `PageRequestCompleted`, `BugFixSubmitted`, `PageBugFixed`, `BugFixRejected` |
 | `completed` | нет новых команд |
 
 ## События

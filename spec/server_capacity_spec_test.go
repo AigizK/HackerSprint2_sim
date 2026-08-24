@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	capacityServerID     model.ServerID = "server-1"
-	capacityServerUnits                 = int64(100)
-	capacityCostPerHour                 = int64(1_000)
-	capacityHoldDuration                = 5 * time.Minute
+	capacityServerID           model.ServerID = "server-1"
+	capacityServerUnits                       = int64(100)
+	capacityCostPerHour                       = int64(1_000)
+	capacityHoldDuration                      = 10 * time.Minute
+	serverProvisioningDuration                = 5 * time.Minute
 )
 
 func TestRequestsWithinServerCapacityAreSuccessful(t *testing.T) {
@@ -124,6 +125,7 @@ func newCapacityScenario(t *testing.T, runID string, pageLoadUnits int64) *spec.
 	s := spec.New(t, runID)
 	s.Given(
 		s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)),
+		s.World.InfrastructureConfigured(serverProvisioningDuration),
 		s.Page.Configured(model.PageProductList, pageLoadUnits, capacityHoldDuration),
 		s.Server.Active(capacityServerID, capacityServerUnits, capacityCostPerHour),
 	)

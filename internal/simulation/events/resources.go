@@ -17,6 +17,7 @@ type ServerProvisioningStarted struct {
 	CapacityUnits    int64
 	CostPerHourMinor int64
 	StartedAt        time.Time
+	ReadyAt          time.Time
 }
 
 func (ServerProvisioningStarted) EventType() string { return "ServerProvisioningStarted" }

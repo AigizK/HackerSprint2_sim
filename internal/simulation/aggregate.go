@@ -109,13 +109,47 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		if applied > remaining {
 			applied = remaining
 		}
-		return []events.Event{events.TimeAdvanced{
+		to := state.Clock.CurrentTime.Add(applied)
+		result := []events.Event{events.TimeAdvanced{
 			From:              state.Clock.CurrentTime,
-			To:                state.Clock.CurrentTime.Add(applied),
+			To:                to,
 			RealElapsed:       command.RealElapsed,
 			RequestedDuration: command.RequestedDuration,
 			AppliedDuration:   applied,
-		}}, nil
+		}}
+		for _, server := range sortedProvisioningServers(state) {
+			if server.ReadyAt.After(to) {
+				continue
+			}
+			result = append(result,
+				events.ServerActivated{
+					OperationID: server.OperationID,
+					ServerID:    server.ID,
+					ActivatedAt: to,
+				},
+				events.OperationSucceeded{
+					OperationID: server.OperationID,
+					CompletedAt: to,
+				},
+			)
+		}
+		for _, server := range sortedDrainingServers(state) {
+			if serverHasLoad(state, server.ID, to) {
+				continue
+			}
+			result = append(result,
+				events.ServerRemoved{
+					OperationID: server.OperationID,
+					ServerID:    server.ID,
+					RemovedAt:   to,
+				},
+				events.OperationSucceeded{
+					OperationID: server.OperationID,
+					CompletedAt: to,
+				},
+			)
+		}
+		return result, nil
 
 	case OpenPage:
 		if err := ensureRunning(state); err != nil {
@@ -236,6 +270,101 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			RejectedAt: state.Clock.CurrentTime,
 		}), nil
 
+	case AddServer:
+		if err := ensureRunning(state); err != nil {
+			return nil, err
+		}
+		if command.CommandID == "" || command.OperationID == "" || command.ServerID == "" ||
+			command.CapacityUnits <= 0 || command.CostPerHourMinor < 0 {
+			return nil, fmt.Errorf("%w: invalid add server command", ErrInvalidCommand)
+		}
+		if err := ensureNewScaleIdentifiers(state, command.CommandID, command.OperationID); err != nil {
+			return nil, err
+		}
+		if _, exists := state.Servers[command.ServerID]; exists {
+			return nil, fmt.Errorf("%w: server %q already exists", ErrInvalidCommand, command.ServerID)
+		}
+		provisioningDuration := state.Infrastructure.ServerProvisioningDuration
+		if provisioningDuration <= 0 {
+			return nil, fmt.Errorf("%w: server provisioning duration is not configured", ErrInvalidCommand)
+		}
+		return []events.Event{
+			events.BackendScaleRequested{
+				CommandID:        command.CommandID,
+				OperationID:      command.OperationID,
+				DesiredInstances: len(state.Servers) + 1,
+				RequestedAt:      state.Clock.CurrentTime,
+			},
+			events.OperationQueued{
+				OperationID: command.OperationID,
+				Kind:        model.OperationScaleBackend,
+				QueuedAt:    state.Clock.CurrentTime,
+			},
+			events.OperationStarted{
+				OperationID: command.OperationID,
+				StartedAt:   state.Clock.CurrentTime,
+			},
+			events.ServerProvisioningStarted{
+				OperationID:      command.OperationID,
+				ServerID:         command.ServerID,
+				CapacityUnits:    command.CapacityUnits,
+				CostPerHourMinor: command.CostPerHourMinor,
+				StartedAt:        state.Clock.CurrentTime,
+				ReadyAt:          state.Clock.CurrentTime.Add(provisioningDuration),
+			},
+		}, nil
+
+	case RemoveServer:
+		if err := ensureRunning(state); err != nil {
+			return nil, err
+		}
+		if command.CommandID == "" || command.OperationID == "" || command.ServerID == "" {
+			return nil, fmt.Errorf("%w: invalid remove server command", ErrInvalidCommand)
+		}
+		if err := ensureNewScaleIdentifiers(state, command.CommandID, command.OperationID); err != nil {
+			return nil, err
+		}
+		server, exists := state.Servers[command.ServerID]
+		if !exists || server.Status != model.ServerActive {
+			return nil, fmt.Errorf("%w: active server %q does not exist", ErrInvalidCommand, command.ServerID)
+		}
+		result := []events.Event{
+			events.BackendScaleRequested{
+				CommandID:        command.CommandID,
+				OperationID:      command.OperationID,
+				DesiredInstances: len(state.Servers) - 1,
+				RequestedAt:      state.Clock.CurrentTime,
+			},
+			events.OperationQueued{
+				OperationID: command.OperationID,
+				Kind:        model.OperationScaleBackend,
+				QueuedAt:    state.Clock.CurrentTime,
+			},
+			events.OperationStarted{
+				OperationID: command.OperationID,
+				StartedAt:   state.Clock.CurrentTime,
+			},
+			events.ServerDrainingStarted{
+				OperationID: command.OperationID,
+				ServerID:    command.ServerID,
+				StartedAt:   state.Clock.CurrentTime,
+			},
+		}
+		if serverHasLoad(state, command.ServerID, state.Clock.CurrentTime) {
+			return result, nil
+		}
+		return append(result,
+			events.ServerRemoved{
+				OperationID: command.OperationID,
+				ServerID:    command.ServerID,
+				RemovedAt:   state.Clock.CurrentTime,
+			},
+			events.OperationSucceeded{
+				OperationID: command.OperationID,
+				CompletedAt: state.Clock.CurrentTime,
+			},
+		), nil
+
 	default:
 		return nil, fmt.Errorf("%w: unsupported command %T", ErrInvalidCommand, command)
 	}
@@ -292,6 +421,46 @@ func selectServer(state State, required int64, at time.Time) (ServerState, int64
 		}
 	}
 	return ServerState{}, maxAvailable, false
+}
+
+func sortedDrainingServers(state State) []ServerState {
+	serverIDs := make([]string, 0, len(state.Servers))
+	for id, server := range state.Servers {
+		if server.Status == model.ServerDraining {
+			serverIDs = append(serverIDs, string(id))
+		}
+	}
+	sort.Strings(serverIDs)
+	servers := make([]ServerState, 0, len(serverIDs))
+	for _, rawID := range serverIDs {
+		servers = append(servers, state.Servers[model.ServerID(rawID)])
+	}
+	return servers
+}
+
+func sortedProvisioningServers(state State) []ServerState {
+	serverIDs := make([]string, 0, len(state.Servers))
+	for id, server := range state.Servers {
+		if server.Status == model.ServerProvisioning {
+			serverIDs = append(serverIDs, string(id))
+		}
+	}
+	sort.Strings(serverIDs)
+	servers := make([]ServerState, 0, len(serverIDs))
+	for _, rawID := range serverIDs {
+		servers = append(servers, state.Servers[model.ServerID(rawID)])
+	}
+	return servers
+}
+
+func ensureNewScaleIdentifiers(state State, commandID model.CommandID, operationID model.OperationID) error {
+	if _, exists := state.Commands[commandID]; exists {
+		return fmt.Errorf("%w: command %q already exists", ErrInvalidCommand, commandID)
+	}
+	if _, exists := state.Operations[operationID]; exists {
+		return fmt.Errorf("%w: operation %q already exists", ErrInvalidCommand, operationID)
+	}
+	return nil
 }
 
 func probabilityHit(seed int64, bugID model.BugID, requestID model.RequestID, probability uint32) bool {

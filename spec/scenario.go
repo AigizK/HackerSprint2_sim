@@ -159,6 +159,19 @@ func (d WorldDSL) Create(seed int64, startedAt, endsAt time.Time) Step {
 	}
 }
 
+func (d WorldDSL) InfrastructureConfigured(serverProvisioningDuration time.Duration) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.InfrastructureConfigured{
+			ServerProvisioningDuration: serverProvisioningDuration,
+			ConfiguredAt:               state.Clock.CurrentTime,
+		})
+	}
+}
+
 type ProductDSL struct{ s *Scenario }
 
 func (d ProductDSL) Added(id simulation.ProductID, name string, priceMinor int64, viewPPM, purchasePPM uint32) Step {
@@ -228,6 +241,7 @@ func (d ServerDSL) Active(id model.ServerID, capacityUnits, costPerHourMinor int
 			CapacityUnits:    capacityUnits,
 			CostPerHourMinor: costPerHourMinor,
 			StartedAt:        state.Clock.CurrentTime,
+			ReadyAt:          state.Clock.CurrentTime,
 		}); err != nil {
 			return err
 		}
@@ -235,6 +249,33 @@ func (d ServerDSL) Active(id model.ServerID, capacityUnits, costPerHourMinor int
 			OperationID: operationID,
 			ServerID:    id,
 			ActivatedAt: state.Clock.CurrentTime,
+		})
+	}
+}
+
+func (d ServerDSL) Add(
+	commandID model.CommandID,
+	operationID model.OperationID,
+	serverID model.ServerID,
+	capacityUnits, costPerHourMinor int64,
+) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.AddServer{
+			CommandID:        commandID,
+			OperationID:      operationID,
+			ServerID:         serverID,
+			CapacityUnits:    capacityUnits,
+			CostPerHourMinor: costPerHourMinor,
+		})
+	}
+}
+
+func (d ServerDSL) Remove(commandID model.CommandID, operationID model.OperationID, serverID model.ServerID) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.RemoveServer{
+			CommandID:   commandID,
+			OperationID: operationID,
+			ServerID:    serverID,
 		})
 	}
 }
@@ -328,6 +369,36 @@ func (d StateDSL) HasProduct(want simulation.ProductState) Assertion {
 		}
 		if !reflect.DeepEqual(got, want) {
 			return fmt.Errorf("product = %#v, want %#v", got, want)
+		}
+		return nil
+	}
+}
+
+func (d StateDSL) ServerStatus(id model.ServerID, want model.ServerLifecycleStatus) Assertion {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		server, exists := state.Servers[id]
+		if !exists {
+			return fmt.Errorf("server %q does not exist", id)
+		}
+		if server.Status != want {
+			return fmt.Errorf("server %q status = %q, want %q", id, server.Status, want)
+		}
+		return nil
+	}
+}
+
+func (d StateDSL) HasNoServer(id model.ServerID) Assertion {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		if _, exists := state.Servers[id]; exists {
+			return fmt.Errorf("server %q still exists", id)
 		}
 		return nil
 	}
