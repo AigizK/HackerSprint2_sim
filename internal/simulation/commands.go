@@ -77,3 +77,11 @@ type RemoveServer struct {
 }
 
 func (RemoveServer) commandType() string { return "RemoveServer" }
+
+type StartDeployment struct {
+	CommandID    model.CommandID
+	DeploymentID model.DeploymentID
+	OperationID  model.OperationID
+}
+
+func (StartDeployment) commandType() string { return "StartDeployment" }

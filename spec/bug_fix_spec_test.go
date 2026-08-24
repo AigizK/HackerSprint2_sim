@@ -130,8 +130,12 @@ func pageBugLog(requestID model.RequestID, visitorID model.VisitorID) logs.Entry
 }
 
 func successPageLog(requestID model.RequestID, visitorID model.VisitorID) logs.Entry {
+	return successPageLogAt(requestID, visitorID, worldStartsAt)
+}
+
+func successPageLogAt(requestID model.RequestID, visitorID model.VisitorID, at time.Time) logs.Entry {
 	return logs.Entry{
-		Timestamp:  worldStartsAt,
+		Timestamp:  at,
 		RequestID:  requestID,
 		Source:     model.RequestSourceVisitor,
 		VisitorID:  visitorID,

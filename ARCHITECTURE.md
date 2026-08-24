@@ -17,9 +17,13 @@
 11. отложенное добавление backend-сервера через provisioning operation;
 12. немедленное удаление свободного сервера;
 13. draining и отложенное удаление занятого сервера;
-14. построение site logs из request events.
+14. последовательный каталог deployments со статусами;
+15. downtime и освобождение capacity во время deployment;
+16. успешные deployment-эффекты для нагрузки страниц и вероятности багов;
+17. failure deployment без применения эффектов;
+18. построение site logs из request events.
 
-Для следующих срезов уже объявлены остальные события посетителей, deployments, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
+Для следующих срезов уже объявлены остальные события посетителей, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
 
 ## Поток команды
 
@@ -36,6 +40,8 @@ Command
 События являются единственным источником истины. `State` не сохраняется как authoritative record и всегда может быть восстановлен replay. Snapshot в будущем будет только оптимизацией.
 
 Продолжительность создания сервера задаётся событием `InfrastructureConfigured`. После команды добавления сервер имеет статус `provisioning` и не участвует в capacity до `ReadyAt`. Пересекающий `ReadyAt` вызов `AdvanceTime` создаёт `ServerActivated` и `OperationSucceeded`.
+
+Deployments выполняются строго по `Sequence`, по одному за раз. Во время `running` весь backend возвращает `DEPLOYMENT_ERROR`, а активные capacity allocations освобождаются. `AdvanceTime` завершает deployment; только успешная ветка применяет типизированные effects, после чего следующая задача становится `available`. Применённые и неуспешные deployments остаются в каталоге.
 
 ## Параллелизм
 
@@ -54,7 +60,7 @@ not_created --WorldCreated--> running --TimeAdvanced(to EndsAt)--> completed
 | Состояние | Разрешённые события |
 |---|---|
 | `not_created` | `WorldCreated` |
-| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced`, `PageConfigured`, `InfrastructureConfigured`, `BackendScaleRequested`, `OperationQueued`, `OperationStarted`, `OperationSucceeded`, `ServerProvisioningStarted`, `ServerActivated`, `ServerDrainingStarted`, `ServerRemoved`, `PageRequestStarted`, `PageRequestAccepted`, `PageRequestRejected`, `PageBugActivated`, `PageBugTriggered`, `PageRequestCompleted`, `BugFixSubmitted`, `PageBugFixed`, `BugFixRejected` |
+| `running` | `ProductAdded`, `ProductPurchased`, `TimeAdvanced`, world/resource/request/bug events, `DeploymentDefined`, `DeploymentUnlocked`, `DeploymentStarted`, `DeploymentCompleted`, `DeploymentFailed`, deployment effect events, operation events |
 | `completed` | нет новых команд |
 
 ## События

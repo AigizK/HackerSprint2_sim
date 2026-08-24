@@ -117,6 +117,10 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			RequestedDuration: command.RequestedDuration,
 			AppliedDuration:   applied,
 		}}
+		if deployment, exists := state.Deployments[state.ActiveDeployment]; exists &&
+			!deployment.ExpectedCompletionAt.After(to) {
+			result = append(result, deploymentCompletionEvents(state, deployment, to)...)
+		}
 		for _, server := range sortedProvisioningServers(state) {
 			if server.ReadyAt.After(to) {
 				continue
@@ -177,6 +181,16 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			LoadUnits: pageConfig.LoadUnits,
 			StartedAt: state.Clock.CurrentTime,
 		}}
+		if state.ActiveDeployment != "" {
+			message := fmt.Sprintf("deployment in progress: %s", state.ActiveDeployment)
+			return append(result, events.PageRequestRejected{
+				RequestID:  command.RequestID,
+				StatusCode: 500,
+				ErrorCode:  model.FailureDeployment,
+				Message:    message,
+				RejectedAt: state.Clock.CurrentTime,
+			}), nil
+		}
 		serverID := model.ServerID("")
 		if pageConfig.LoadUnits > 0 {
 			server, available, accepted := selectServer(state, pageConfig.LoadUnits, state.Clock.CurrentTime)
@@ -365,6 +379,65 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			},
 		), nil
 
+	case StartDeployment:
+		if err := ensureRunning(state); err != nil {
+			return nil, err
+		}
+		if command.CommandID == "" || command.DeploymentID == "" || command.OperationID == "" {
+			return nil, fmt.Errorf("%w: invalid start deployment command", ErrInvalidCommand)
+		}
+		if state.ActiveDeployment != "" {
+			return nil, ErrDeploymentInProgress
+		}
+		deployment, exists := state.Deployments[command.DeploymentID]
+		if !exists {
+			return nil, fmt.Errorf("%w: deployment %q does not exist", ErrInvalidCommand, command.DeploymentID)
+		}
+		if deployment.Status == model.DeploymentStatusApplied || deployment.Status == model.DeploymentStatusSucceeded {
+			return nil, ErrDeploymentApplied
+		}
+		if deployment.Status != model.DeploymentStatusAvailable {
+			return nil, ErrDeploymentLocked
+		}
+		if err := ensureNewScaleIdentifiers(state, command.CommandID, command.OperationID); err != nil {
+			return nil, err
+		}
+		result := []events.Event{
+			events.OperationQueued{
+				OperationID: command.OperationID,
+				Kind:        model.OperationDeployment,
+				QueuedAt:    state.Clock.CurrentTime,
+			},
+			events.OperationStarted{
+				OperationID: command.OperationID,
+				StartedAt:   state.Clock.CurrentTime,
+			},
+			events.DeploymentStarted{
+				CommandID:            command.CommandID,
+				DeploymentID:         command.DeploymentID,
+				OperationID:          command.OperationID,
+				StartedAt:            state.Clock.CurrentTime,
+				ExpectedCompletionAt: state.Clock.CurrentTime.Add(deployment.Duration),
+			},
+		}
+		requestIDs := make([]string, 0, len(state.Capacity))
+		for requestID, allocation := range state.Capacity {
+			if allocation.ReleasesAt.After(state.Clock.CurrentTime) {
+				requestIDs = append(requestIDs, string(requestID))
+			}
+		}
+		sort.Strings(requestIDs)
+		for _, rawID := range requestIDs {
+			allocation := state.Capacity[model.RequestID(rawID)]
+			result = append(result, events.CapacityAllocationReleased{
+				DeploymentID: command.DeploymentID,
+				RequestID:    allocation.RequestID,
+				ServerID:     allocation.ServerID,
+				ReleasedAt:   state.Clock.CurrentTime,
+			})
+		}
+		return result, nil
+
 	default:
 		return nil, fmt.Errorf("%w: unsupported command %T", ErrInvalidCommand, command)
 	}
@@ -461,6 +534,113 @@ func ensureNewScaleIdentifiers(state State, commandID model.CommandID, operation
 		return fmt.Errorf("%w: operation %q already exists", ErrInvalidCommand, operationID)
 	}
 	return nil
+}
+
+func deploymentCompletionEvents(state State, deployment DeploymentState, completedAt time.Time) []events.Event {
+	if deploymentFailureHit(state.Seed, deployment.ID, deployment.OperationID, deployment.FailureProbabilityPPM) {
+		result := []events.Event{
+			events.DeploymentFailed{
+				DeploymentID: deployment.ID,
+				OperationID:  deployment.OperationID,
+				ErrorCode:    "DEPLOYMENT_FAILED",
+				Message:      "deployment failed",
+				FailedAt:     completedAt,
+			},
+			events.OperationFailed{
+				OperationID: deployment.OperationID,
+				ErrorCode:   "DEPLOYMENT_FAILED",
+				Message:     "deployment failed",
+				FailedAt:    completedAt,
+			},
+		}
+		return appendNextDeploymentUnlocked(result, state, deployment.Sequence, completedAt)
+	}
+
+	result := []events.Event{events.DeploymentCompleted{
+		DeploymentID: deployment.ID,
+		OperationID:  deployment.OperationID,
+		CompletedAt:  completedAt,
+	}}
+	pages := make(map[model.PageType]PageConfigState, len(state.Pages))
+	for pageType, page := range state.Pages {
+		pages[pageType] = page
+	}
+	for _, effect := range state.DeploymentPageLoadEffects[deployment.ID] {
+		page := pages[effect.Page]
+		result = append(result, events.PageLoadChanged{
+			DeploymentID:    deployment.ID,
+			Page:            effect.Page,
+			OldLoadUnits:    page.LoadUnits,
+			NewLoadUnits:    effect.NewLoadUnits,
+			OldHoldDuration: page.HoldDuration,
+			NewHoldDuration: effect.NewHoldDuration,
+			ChangedAt:       completedAt,
+		})
+		page.LoadUnits = effect.NewLoadUnits
+		page.HoldDuration = effect.NewHoldDuration
+		pages[effect.Page] = page
+	}
+	bugs := make(map[model.BugID]BugState, len(state.Bugs))
+	for bugID, bug := range state.Bugs {
+		bugs[bugID] = bug
+	}
+	for _, effect := range state.DeploymentBugEffects[deployment.ID] {
+		bug := bugs[effect.BugID]
+		result = append(result, events.PageBugProbabilityChanged{
+			DeploymentID:      deployment.ID,
+			BugID:             effect.BugID,
+			OldProbabilityPPM: bug.FailureProbabilityPPM,
+			NewProbabilityPPM: effect.NewProbabilityPPM,
+			ChangedAt:         completedAt,
+		})
+		bug.FailureProbabilityPPM = effect.NewProbabilityPPM
+		bugs[effect.BugID] = bug
+	}
+	result = append(result, events.OperationSucceeded{
+		OperationID: deployment.OperationID,
+		CompletedAt: completedAt,
+	})
+	return appendNextDeploymentUnlocked(result, state, deployment.Sequence, completedAt)
+}
+
+func appendNextDeploymentUnlocked(
+	result []events.Event,
+	state State,
+	completedSequence int,
+	at time.Time,
+) []events.Event {
+	var next DeploymentState
+	found := false
+	for _, candidate := range state.Deployments {
+		if candidate.Status != model.DeploymentStatusLocked || candidate.Sequence <= completedSequence {
+			continue
+		}
+		if !found || candidate.Sequence < next.Sequence {
+			next = candidate
+			found = true
+		}
+	}
+	if found {
+		result = append(result, events.DeploymentUnlocked{DeploymentID: next.ID, UnlockedAt: at})
+	}
+	return result
+}
+
+func deploymentFailureHit(
+	seed int64,
+	deploymentID model.DeploymentID,
+	operationID model.OperationID,
+	probability uint32,
+) bool {
+	if probability == 0 {
+		return false
+	}
+	if probability >= ProbabilityScale {
+		return true
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", seed, deploymentID, operationID)))
+	roll := binary.BigEndian.Uint64(digest[:8]) % uint64(ProbabilityScale)
+	return roll < uint64(probability)
 }
 
 func probabilityHit(seed int64, bugID model.BugID, requestID model.RequestID, probability uint32) bool {

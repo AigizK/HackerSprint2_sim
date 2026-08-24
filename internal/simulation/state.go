@@ -18,6 +18,9 @@ var (
 	ErrPurchaseAlreadyExists = errors.New("purchase already exists")
 	ErrInvalidCommand        = errors.New("invalid command")
 	ErrInvalidEvent          = errors.New("invalid event")
+	ErrDeploymentLocked      = errors.New("deployment is locked")
+	ErrDeploymentInProgress  = errors.New("deployment is already in progress")
+	ErrDeploymentApplied     = errors.New("deployment is already applied")
 )
 
 func (s *State) Apply(event events.Event) error {
@@ -165,6 +168,97 @@ func (s *State) Apply(event events.Event) error {
 		}
 		return nil
 
+	case events.DeploymentDefined:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.DeploymentID == "" || event.Sequence <= 0 || event.Name == "" || event.Description == "" ||
+			event.CostMinor < 0 || event.Duration <= 0 || event.FailureProbabilityPPM > ProbabilityScale ||
+			!event.DefinedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid deployment definition", ErrInvalidEvent)
+		}
+		if s.Deployments == nil {
+			s.Deployments = make(map[model.DeploymentID]DeploymentState)
+		}
+		if _, exists := s.Deployments[event.DeploymentID]; exists {
+			return fmt.Errorf("%w: deployment %q already exists", ErrInvalidEvent, event.DeploymentID)
+		}
+		for _, deployment := range s.Deployments {
+			if deployment.Sequence == event.Sequence {
+				return fmt.Errorf("%w: deployment sequence %d already exists", ErrInvalidEvent, event.Sequence)
+			}
+		}
+		s.Deployments[event.DeploymentID] = DeploymentState{
+			ID:                    event.DeploymentID,
+			Sequence:              event.Sequence,
+			Name:                  event.Name,
+			Description:           event.Description,
+			CostMinor:             event.CostMinor,
+			Duration:              event.Duration,
+			FailureProbabilityPPM: event.FailureProbabilityPPM,
+			Status:                model.DeploymentStatusLocked,
+			DefinedAt:             event.DefinedAt,
+		}
+		return nil
+
+	case events.DeploymentUnlocked:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !exists || deployment.Status != model.DeploymentStatusLocked || !deploymentCanUnlock(*s, deployment) ||
+			!event.UnlockedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: deployment %q cannot be unlocked", ErrInvalidEvent, event.DeploymentID)
+		}
+		deployment.Status = model.DeploymentStatusAvailable
+		s.Deployments[event.DeploymentID] = deployment
+		return nil
+
+	case events.DeploymentPageLoadEffectDefined:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		_, pageExists := s.Pages[event.Page]
+		if !exists || (deployment.Status != model.DeploymentStatusLocked && deployment.Status != model.DeploymentStatusAvailable) || !pageExists ||
+			!validPage(event.Page) || event.NewLoadUnits <= 0 || event.NewHoldDuration <= 0 ||
+			!event.DefinedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid deployment page-load effect", ErrInvalidEvent)
+		}
+		if s.DeploymentPageLoadEffects == nil {
+			s.DeploymentPageLoadEffects = make(map[model.DeploymentID][]DeploymentPageLoadEffectState)
+		}
+		s.DeploymentPageLoadEffects[event.DeploymentID] = append(
+			s.DeploymentPageLoadEffects[event.DeploymentID],
+			DeploymentPageLoadEffectState{
+				Page:            event.Page,
+				NewLoadUnits:    event.NewLoadUnits,
+				NewHoldDuration: event.NewHoldDuration,
+			},
+		)
+		return nil
+
+	case events.DeploymentBugProbabilityEffectDefined:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !exists || (deployment.Status != model.DeploymentStatusLocked && deployment.Status != model.DeploymentStatusAvailable) ||
+			event.BugID == "" || event.NewProbabilityPPM > ProbabilityScale || !event.DefinedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid deployment bug effect", ErrInvalidEvent)
+		}
+		if _, exists := s.Bugs[event.BugID]; !exists {
+			return fmt.Errorf("%w: bug %q does not exist", ErrInvalidEvent, event.BugID)
+		}
+		if s.DeploymentBugEffects == nil {
+			s.DeploymentBugEffects = make(map[model.DeploymentID][]DeploymentBugProbabilityEffectState)
+		}
+		s.DeploymentBugEffects[event.DeploymentID] = append(
+			s.DeploymentBugEffects[event.DeploymentID],
+			DeploymentBugProbabilityEffectState{BugID: event.BugID, NewProbabilityPPM: event.NewProbabilityPPM},
+		)
+		return nil
+
 	case events.BackendScaleRequested:
 		if err := ensureRunning(*s); err != nil {
 			return err
@@ -216,6 +310,93 @@ func (s *State) Apply(event events.Event) error {
 		s.Operations[event.OperationID] = operation
 		return nil
 
+	case events.DeploymentStarted:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		operation, operationExists := s.Operations[event.OperationID]
+		if !exists || deployment.Status != model.DeploymentStatusAvailable || s.ActiveDeployment != "" ||
+			!operationExists || operation.Kind != model.OperationDeployment || operation.Status != model.OperationStatusRunning ||
+			event.CommandID == "" || !event.StartedAt.Equal(s.Clock.CurrentTime) ||
+			event.ExpectedCompletionAt != event.StartedAt.Add(deployment.Duration) {
+			return fmt.Errorf("%w: deployment %q cannot be started", ErrInvalidEvent, event.DeploymentID)
+		}
+		if _, exists := s.Commands[event.CommandID]; exists {
+			return fmt.Errorf("%w: command %q already exists", ErrInvalidEvent, event.CommandID)
+		}
+		s.Commands[event.CommandID] = event.OperationID
+		deployment.Status = model.DeploymentStatusRunning
+		deployment.OperationID = event.OperationID
+		deployment.StartedAt = event.StartedAt
+		deployment.ExpectedCompletionAt = event.ExpectedCompletionAt
+		s.Deployments[event.DeploymentID] = deployment
+		s.ActiveDeployment = event.DeploymentID
+		return nil
+
+	case events.DeploymentCompleted:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !exists || deployment.Status != model.DeploymentStatusRunning || deployment.OperationID != event.OperationID ||
+			s.ActiveDeployment != event.DeploymentID || event.CompletedAt.Before(deployment.ExpectedCompletionAt) ||
+			!event.CompletedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: deployment %q cannot complete", ErrInvalidEvent, event.DeploymentID)
+		}
+		deployment.Status = model.DeploymentStatusApplied
+		deployment.CompletedAt = event.CompletedAt
+		s.Deployments[event.DeploymentID] = deployment
+		s.ActiveDeployment = ""
+		return nil
+
+	case events.DeploymentFailed:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !exists || deployment.Status != model.DeploymentStatusRunning || deployment.OperationID != event.OperationID ||
+			s.ActiveDeployment != event.DeploymentID || event.ErrorCode == "" || event.Message == "" ||
+			event.FailedAt.Before(deployment.ExpectedCompletionAt) || !event.FailedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: deployment %q cannot fail", ErrInvalidEvent, event.DeploymentID)
+		}
+		deployment.Status = model.DeploymentStatusFailed
+		deployment.CompletedAt = event.FailedAt
+		s.Deployments[event.DeploymentID] = deployment
+		s.ActiveDeployment = ""
+		return nil
+
+	case events.PageLoadChanged:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		page, pageExists := s.Pages[event.Page]
+		if !exists || deployment.Status != model.DeploymentStatusApplied || !pageExists ||
+			page.LoadUnits != event.OldLoadUnits || page.HoldDuration != event.OldHoldDuration ||
+			event.NewLoadUnits <= 0 || event.NewHoldDuration <= 0 || !event.ChangedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid page-load change", ErrInvalidEvent)
+		}
+		page.LoadUnits = event.NewLoadUnits
+		page.HoldDuration = event.NewHoldDuration
+		s.Pages[event.Page] = page
+		return nil
+
+	case events.PageBugProbabilityChanged:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		bug, bugExists := s.Bugs[event.BugID]
+		if !exists || deployment.Status != model.DeploymentStatusApplied || !bugExists ||
+			bug.FailureProbabilityPPM != event.OldProbabilityPPM || event.NewProbabilityPPM > ProbabilityScale ||
+			!event.ChangedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid page-bug probability change", ErrInvalidEvent)
+		}
+		bug.FailureProbabilityPPM = event.NewProbabilityPPM
+		s.Bugs[event.BugID] = bug
+		return nil
+
 	case events.OperationSucceeded:
 		if err := ensureRunExists(*s); err != nil {
 			return err
@@ -226,6 +407,20 @@ func (s *State) Apply(event events.Event) error {
 		}
 		operation.Status = model.OperationStatusSucceeded
 		operation.CompletedAt = event.CompletedAt
+		s.Operations[event.OperationID] = operation
+		return nil
+
+	case events.OperationFailed:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		operation, exists := s.Operations[event.OperationID]
+		if !exists || operation.Status != model.OperationStatusRunning || event.ErrorCode == "" || event.Message == "" ||
+			!event.FailedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: operation %q cannot fail", ErrInvalidEvent, event.OperationID)
+		}
+		operation.Status = model.OperationStatusFailed
+		operation.CompletedAt = event.FailedAt
 		s.Operations[event.OperationID] = operation
 		return nil
 
@@ -382,6 +577,21 @@ func (s *State) Apply(event events.Event) error {
 		s.Requests[event.RequestID] = request
 		return nil
 
+	case events.CapacityAllocationReleased:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		allocation, exists := s.Capacity[event.RequestID]
+		if !exists || s.ActiveDeployment != event.DeploymentID || allocation.ServerID != event.ServerID ||
+			!allocation.ReleasesAt.After(event.ReleasedAt) || !event.ReleasedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: capacity allocation %q cannot be released", ErrInvalidEvent, event.RequestID)
+		}
+		delete(s.Capacity, event.RequestID)
+		request := s.Requests[event.RequestID]
+		request.ReleasesAt = event.ReleasedAt
+		s.Requests[event.RequestID] = request
+		return nil
+
 	case events.PageBugTriggered:
 		bug, exists := s.Bugs[event.BugID]
 		if !exists {
@@ -521,4 +731,17 @@ func ensureRunExists(state State) error {
 		return ErrWorldNotCreated
 	}
 	return nil
+}
+
+func deploymentCanUnlock(state State, candidate DeploymentState) bool {
+	for _, deployment := range state.Deployments {
+		if deployment.Sequence >= candidate.Sequence {
+			continue
+		}
+		if deployment.Status != model.DeploymentStatusApplied && deployment.Status != model.DeploymentStatusFailed &&
+			deployment.Status != model.DeploymentStatusSucceeded {
+			return false
+		}
+	}
+	return true
 }

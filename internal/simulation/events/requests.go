@@ -23,6 +23,15 @@ type PageRequestAccepted struct {
 
 func (PageRequestAccepted) EventType() string { return "PageRequestAccepted" }
 
+type CapacityAllocationReleased struct {
+	DeploymentID DeploymentID
+	RequestID    RequestID
+	ServerID     ServerID
+	ReleasedAt   time.Time
+}
+
+func (CapacityAllocationReleased) EventType() string { return "CapacityAllocationReleased" }
+
 type PageRequestCompleted struct {
 	RequestID   RequestID
 	ServerID    ServerID

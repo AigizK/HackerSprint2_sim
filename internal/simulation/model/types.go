@@ -113,6 +113,7 @@ const (
 	DeploymentStatusAvailable DeploymentLifecycleStatus = "available"
 	DeploymentStatusQueued    DeploymentLifecycleStatus = "queued"
 	DeploymentStatusRunning   DeploymentLifecycleStatus = "running"
+	DeploymentStatusApplied   DeploymentLifecycleStatus = "applied"
 	DeploymentStatusSucceeded DeploymentLifecycleStatus = "succeeded"
 	DeploymentStatusFailed    DeploymentLifecycleStatus = "failed"
 )

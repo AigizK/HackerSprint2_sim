@@ -3,12 +3,14 @@ package events
 import "time"
 
 type DeploymentDefined struct {
-	DeploymentID DeploymentID
-	Sequence     int
-	Name         string
-	Description  string
-	CostMinor    int64
-	DefinedAt    time.Time
+	DeploymentID          DeploymentID
+	Sequence              int
+	Name                  string
+	Description           string
+	CostMinor             int64
+	Duration              time.Duration
+	FailureProbabilityPPM uint32
+	DefinedAt             time.Time
 }
 
 func (DeploymentDefined) EventType() string { return "DeploymentDefined" }
@@ -48,6 +50,29 @@ type DeploymentFailed struct {
 
 func (DeploymentFailed) EventType() string { return "DeploymentFailed" }
 
+type DeploymentPageLoadEffectDefined struct {
+	DeploymentID    DeploymentID
+	Page            PageType
+	NewLoadUnits    int64
+	NewHoldDuration time.Duration
+	DefinedAt       time.Time
+}
+
+func (DeploymentPageLoadEffectDefined) EventType() string {
+	return "DeploymentPageLoadEffectDefined"
+}
+
+type DeploymentBugProbabilityEffectDefined struct {
+	DeploymentID      DeploymentID
+	BugID             BugID
+	NewProbabilityPPM uint32
+	DefinedAt         time.Time
+}
+
+func (DeploymentBugProbabilityEffectDefined) EventType() string {
+	return "DeploymentBugProbabilityEffectDefined"
+}
+
 type PageLoadChanged struct {
 	DeploymentID    DeploymentID
 	Page            PageType
@@ -59,3 +84,13 @@ type PageLoadChanged struct {
 }
 
 func (PageLoadChanged) EventType() string { return "PageLoadChanged" }
+
+type PageBugProbabilityChanged struct {
+	DeploymentID      DeploymentID
+	BugID             BugID
+	OldProbabilityPPM uint32
+	NewProbabilityPPM uint32
+	ChangedAt         time.Time
+}
+
+func (PageBugProbabilityChanged) EventType() string { return "PageBugProbabilityChanged" }

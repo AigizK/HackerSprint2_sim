@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -29,16 +30,18 @@ type Scenario struct {
 	emitted []events.Event
 	logs    []logs.Entry
 
-	World   WorldDSL
-	Product ProductDSL
-	Page    PageDSL
-	Server  ServerDSL
-	User    UserDSL
-	Bug     BugDSL
-	Time    TimeDSL
-	State   StateDSL
-	Events  EventsDSL
-	Logs    LogsDSL
+	World       WorldDSL
+	Product     ProductDSL
+	Page        PageDSL
+	Server      ServerDSL
+	User        UserDSL
+	Bug         BugDSL
+	Deployment  DeploymentDSL
+	Time        TimeDSL
+	State       StateDSL
+	Events      EventsDSL
+	Logs        LogsDSL
+	Deployments DeploymentsDSL
 }
 
 func New(t *testing.T, runID string) *Scenario {
@@ -60,10 +63,12 @@ func New(t *testing.T, runID string) *Scenario {
 	s.Server = ServerDSL{s: s}
 	s.User = UserDSL{s: s}
 	s.Bug = BugDSL{s: s}
+	s.Deployment = DeploymentDSL{s: s}
 	s.Time = TimeDSL{s: s}
 	s.State = StateDSL{s: s}
 	s.Events = EventsDSL{s: s}
 	s.Logs = LogsDSL{s: s}
+	s.Deployments = DeploymentsDSL{s: s}
 	return s
 }
 
@@ -334,6 +339,91 @@ func (d BugDSL) Fix(commandID model.CommandID, message string) Step {
 	}
 }
 
+type DeploymentDSL struct{ s *Scenario }
+
+func (d DeploymentDSL) Defined(
+	id model.DeploymentID,
+	sequence int,
+	name string,
+	duration time.Duration,
+	failureProbabilityPPM uint32,
+) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.DeploymentDefined{
+			DeploymentID:          id,
+			Sequence:              sequence,
+			Name:                  name,
+			Description:           name,
+			Duration:              duration,
+			FailureProbabilityPPM: failureProbabilityPPM,
+			DefinedAt:             state.Clock.CurrentTime,
+		})
+	}
+}
+
+func (d DeploymentDSL) Unlocked(id model.DeploymentID) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.DeploymentUnlocked{
+			DeploymentID: id,
+			UnlockedAt:   state.Clock.CurrentTime,
+		})
+	}
+}
+
+func (d DeploymentDSL) PageLoadEffect(
+	id model.DeploymentID,
+	page model.PageType,
+	newLoadUnits int64,
+	newHoldDuration time.Duration,
+) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.DeploymentPageLoadEffectDefined{
+			DeploymentID:    id,
+			Page:            page,
+			NewLoadUnits:    newLoadUnits,
+			NewHoldDuration: newHoldDuration,
+			DefinedAt:       state.Clock.CurrentTime,
+		})
+	}
+}
+
+func (d DeploymentDSL) BugProbabilityEffect(id model.DeploymentID, bugID model.BugID, newProbabilityPPM uint32) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.DeploymentBugProbabilityEffectDefined{
+			DeploymentID:      id,
+			BugID:             bugID,
+			NewProbabilityPPM: newProbabilityPPM,
+			DefinedAt:         state.Clock.CurrentTime,
+		})
+	}
+}
+
+func (d DeploymentDSL) Start(commandID model.CommandID, deploymentID model.DeploymentID, operationID model.OperationID) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.StartDeployment{
+			CommandID:    commandID,
+			DeploymentID: deploymentID,
+			OperationID:  operationID,
+		})
+	}
+}
+
 type StateDSL struct{ s *Scenario }
 
 func (d StateDSL) IsRunning() Assertion {
@@ -458,12 +548,71 @@ func (d EventsDSL) None() Assertion {
 	return d.Exactly()
 }
 
+func (d EventsDSL) Contains(want ...events.Event) Assertion {
+	return func(s *Scenario) error {
+		for _, expected := range want {
+			found := false
+			for _, actual := range s.emitted {
+				if reflect.DeepEqual(actual, expected) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("emitted events %#v do not contain %#v", s.emitted, expected)
+			}
+		}
+		return nil
+	}
+}
+
+func (d EventsDSL) HasNoType(eventType string) Assertion {
+	return func(s *Scenario) error {
+		for _, event := range s.emitted {
+			if event.EventType() == eventType {
+				return fmt.Errorf("emitted events unexpectedly contain %s: %#v", eventType, s.emitted)
+			}
+		}
+		return nil
+	}
+}
+
 type LogsDSL struct{ s *Scenario }
 
 func (d LogsDSL) Exactly(want ...logs.Entry) Assertion {
 	return func(s *Scenario) error {
 		if !reflect.DeepEqual(s.logs, want) {
 			return fmt.Errorf("site logs = %#v, want %#v", s.logs, want)
+		}
+		return nil
+	}
+}
+
+type DeploymentStatusExpectation struct {
+	ID       model.DeploymentID
+	Sequence int
+	Status   model.DeploymentLifecycleStatus
+}
+
+type DeploymentsDSL struct{ s *Scenario }
+
+func (d DeploymentsDSL) Statuses(want ...DeploymentStatusExpectation) Assertion {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		got := make([]DeploymentStatusExpectation, 0, len(state.Deployments))
+		for _, deployment := range state.Deployments {
+			got = append(got, DeploymentStatusExpectation{
+				ID:       deployment.ID,
+				Sequence: deployment.Sequence,
+				Status:   deployment.Status,
+			})
+		}
+		sort.Slice(got, func(i, j int) bool { return got[i].Sequence < got[j].Sequence })
+		if !reflect.DeepEqual(got, want) {
+			return fmt.Errorf("deployments = %#v, want %#v", got, want)
 		}
 		return nil
 	}
