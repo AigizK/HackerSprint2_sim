@@ -8,6 +8,10 @@ type TrafficAttackStarted struct {
 	TargetPage          PageType
 	RequestsPerMinute   int64
 	LoadUnitsPerRequest int64
+	Resolution          AttackResolution
+	ExpectedEndAt       time.Time
+	FixMessage          string
+	FixMessageHash      string
 	StartedAt           time.Time
 }
 

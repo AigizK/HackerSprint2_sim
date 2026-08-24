@@ -47,6 +47,23 @@ Deployments выполняются строго по `Sequence`, по одном
 
 Разные `run_id` обрабатываются параллельно. `Engine` создаёт одну goroutine/event loop на активный run и передаёт ей команды через отдельный buffered channel. Event store дополнительно защищает stream optimistic concurrency через `expectedVersion`.
 
+## Persistence
+
+Локальное постоянное хранилище использует SQLite и четыре основные таблицы:
+
+- `worlds` — неизменяемая метаинформация мира с уникальным ключом `(seed, profile_hash, generator_version)`;
+- `world_events` — bootstrap и заранее сгенерированное расписание этого мира;
+- `runs` — запуск конкретного агента и его текущее симуляционное время;
+- `run_events` — независимый append-only event stream запуска с версией для optimistic concurrency.
+
+Run ссылается на один сохранённый `world_id`, но события разных runs не смешиваются. После рестарта `State` восстанавливается replay из `run_events`. `CachedEventStore` может держать event streams активных runs в памяти с ограничением по количеству runs; SQLite всегда остаётся authoritative source, поэтому потеря cache безопасна.
+
+## World generator
+
+Положительный seed вместе с `profile_hash` и `generator_version` детерминированно создаёт immutable `WorldDefinition`. Namespaced random строится через SHA-256 и не зависит от порядка вызовов или goroutines. Bootstrap содержит страницы, экономику, начальные серверы, товары, баги и очередь deployments. Schedule содержит годовой поток `VisitorArrived`, а также начало и окончание DDoS-атак.
+
+После генерации вычисляется канонический `schedule_hash`. `GetOrCreate` сначала ищет ключ мира в `WorldRepository`; конкурентное создание защищается unique constraint SQLite, поэтому один и тот же ключ сохраняется только один раз.
+
 ## FSM
 
 Run:

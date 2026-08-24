@@ -39,6 +39,9 @@ type ProductState struct {
 }
 
 type EconomyState struct {
+	InitialBalanceMinor int64
+	StopRunOnNegative   bool
+	ServerBillingPeriod time.Duration
 	RevenueMinor        int64
 	SuccessfulPurchases uint64
 	LostPurchases       uint64
@@ -126,6 +129,19 @@ type VisitorState struct {
 	CompletedAt time.Time
 }
 
+type AttackState struct {
+	ID                  model.AttackID
+	Kind                model.AttackKind
+	TargetPage          model.PageType
+	RequestsPerMinute   int64
+	LoadUnitsPerRequest int64
+	Resolution          model.AttackResolution
+	ExpectedEndAt       time.Time
+	FixMessage          string
+	FixMessageHash      string
+	StartedAt           time.Time
+}
+
 type DeploymentState struct {
 	ID                    model.DeploymentID
 	Sequence              int
@@ -151,6 +167,20 @@ type DeploymentPageLoadEffectState struct {
 type DeploymentBugProbabilityEffectState struct {
 	BugID             model.BugID
 	NewProbabilityPPM uint32
+}
+
+type DeploymentFutureDurationEffectState struct {
+	ReductionPPM    uint32
+	MinimumDuration time.Duration
+}
+
+type DeploymentNewBugEffectState struct {
+	BugID                 model.BugID
+	Page                  model.PageType
+	ProductID             ProductID
+	FailureProbabilityPPM uint32
+	FixMessage            string
+	FixMessageHash        string
 }
 
 type PageRequestState struct {
@@ -190,9 +220,12 @@ type State struct {
 	Deployments               map[model.DeploymentID]DeploymentState
 	DeploymentPageLoadEffects map[model.DeploymentID][]DeploymentPageLoadEffectState
 	DeploymentBugEffects      map[model.DeploymentID][]DeploymentBugProbabilityEffectState
+	DeploymentDurationEffects map[model.DeploymentID][]DeploymentFutureDurationEffectState
+	DeploymentNewBugEffects   map[model.DeploymentID][]DeploymentNewBugEffectState
 	ActiveDeployment          model.DeploymentID
 	Requests                  map[model.RequestID]PageRequestState
 	Visitors                  map[model.VisitorID]VisitorState
+	ActiveAttacks             map[model.AttackID]AttackState
 	Schedule                  events.EventSchedule
 	ScheduleCursor            int
 	DesiredInstances          int
@@ -215,7 +248,10 @@ func NewState() State {
 		Deployments:               make(map[model.DeploymentID]DeploymentState),
 		DeploymentPageLoadEffects: make(map[model.DeploymentID][]DeploymentPageLoadEffectState),
 		DeploymentBugEffects:      make(map[model.DeploymentID][]DeploymentBugProbabilityEffectState),
+		DeploymentDurationEffects: make(map[model.DeploymentID][]DeploymentFutureDurationEffectState),
+		DeploymentNewBugEffects:   make(map[model.DeploymentID][]DeploymentNewBugEffectState),
 		Requests:                  make(map[model.RequestID]PageRequestState),
 		Visitors:                  make(map[model.VisitorID]VisitorState),
+		ActiveAttacks:             make(map[model.AttackID]AttackState),
 	}
 }

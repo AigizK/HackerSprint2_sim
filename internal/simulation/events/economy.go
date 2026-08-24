@@ -2,6 +2,15 @@ package events
 
 import "time"
 
+type EconomyConfigured struct {
+	InitialBalanceMinor      int64
+	StopRunOnNegativeBalance bool
+	ServerBillingPeriod      time.Duration
+	ConfiguredAt             time.Time
+}
+
+func (EconomyConfigured) EventType() string { return "EconomyConfigured" }
+
 type InfrastructureCostAccrued struct {
 	ServerID    ServerID
 	From        time.Time

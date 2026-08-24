@@ -680,6 +680,41 @@ func deploymentCompletionEvents(state State, deployment DeploymentState, complet
 		bug.FailureProbabilityPPM = effect.NewProbabilityPPM
 		bugs[effect.BugID] = bug
 	}
+	durations := make(map[model.DeploymentID]time.Duration, len(state.Deployments))
+	for deploymentID, candidate := range state.Deployments {
+		durations[deploymentID] = candidate.Duration
+	}
+	for _, effect := range state.DeploymentDurationEffects[deployment.ID] {
+		candidates := make([]DeploymentState, 0)
+		for _, candidate := range state.Deployments {
+			if candidate.Sequence > deployment.Sequence && candidate.Status == model.DeploymentStatusLocked {
+				candidates = append(candidates, candidate)
+			}
+		}
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].Sequence < candidates[j].Sequence })
+		for _, candidate := range candidates {
+			oldDuration := durations[candidate.ID]
+			newDuration := time.Duration(int64(oldDuration) * int64(ProbabilityScale-effect.ReductionPPM) / int64(ProbabilityScale))
+			if newDuration < effect.MinimumDuration {
+				newDuration = effect.MinimumDuration
+			}
+			if newDuration > oldDuration {
+				newDuration = oldDuration
+			}
+			result = append(result, events.DeploymentDurationChanged{
+				SourceDeploymentID: deployment.ID, DeploymentID: candidate.ID,
+				OldDuration: oldDuration, NewDuration: newDuration, ChangedAt: completedAt,
+			})
+			durations[candidate.ID] = newDuration
+		}
+	}
+	for _, effect := range state.DeploymentNewBugEffects[deployment.ID] {
+		result = append(result, events.PageBugActivated{
+			BugID: effect.BugID, Page: effect.Page, ProductID: effect.ProductID,
+			FailureProbabilityPPM: effect.FailureProbabilityPPM, FixMessage: effect.FixMessage,
+			FixMessageHash: effect.FixMessageHash, ActivatedAt: completedAt,
+		})
+	}
 	result = append(result, events.OperationSucceeded{
 		OperationID: deployment.OperationID,
 		CompletedAt: completedAt,

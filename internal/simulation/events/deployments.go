@@ -73,6 +73,30 @@ func (DeploymentBugProbabilityEffectDefined) EventType() string {
 	return "DeploymentBugProbabilityEffectDefined"
 }
 
+type DeploymentFutureDurationEffectDefined struct {
+	DeploymentID    DeploymentID
+	ReductionPPM    uint32
+	MinimumDuration time.Duration
+	DefinedAt       time.Time
+}
+
+func (DeploymentFutureDurationEffectDefined) EventType() string {
+	return "DeploymentFutureDurationEffectDefined"
+}
+
+type DeploymentNewBugEffectDefined struct {
+	DeploymentID          DeploymentID
+	BugID                 BugID
+	Page                  PageType
+	ProductID             ProductID
+	FailureProbabilityPPM uint32
+	FixMessage            string
+	FixMessageHash        string
+	DefinedAt             time.Time
+}
+
+func (DeploymentNewBugEffectDefined) EventType() string { return "DeploymentNewBugEffectDefined" }
+
 type PageLoadChanged struct {
 	DeploymentID    DeploymentID
 	Page            PageType
@@ -94,3 +118,13 @@ type PageBugProbabilityChanged struct {
 }
 
 func (PageBugProbabilityChanged) EventType() string { return "PageBugProbabilityChanged" }
+
+type DeploymentDurationChanged struct {
+	SourceDeploymentID DeploymentID
+	DeploymentID       DeploymentID
+	OldDuration        time.Duration
+	NewDuration        time.Duration
+	ChangedAt          time.Time
+}
+
+func (DeploymentDurationChanged) EventType() string { return "DeploymentDurationChanged" }

@@ -291,6 +291,52 @@ func (s *State) Apply(event events.Event) error {
 		)
 		return nil
 
+	case events.DeploymentFutureDurationEffectDefined:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !exists || (deployment.Status != model.DeploymentStatusLocked && deployment.Status != model.DeploymentStatusAvailable) ||
+			event.ReductionPPM == 0 || event.ReductionPPM >= ProbabilityScale || event.MinimumDuration <= 0 ||
+			!event.DefinedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid future deployment-duration effect", ErrInvalidEvent)
+		}
+		s.DeploymentDurationEffects[event.DeploymentID] = append(s.DeploymentDurationEffects[event.DeploymentID], DeploymentFutureDurationEffectState{
+			ReductionPPM: event.ReductionPPM, MinimumDuration: event.MinimumDuration,
+		})
+		return nil
+
+	case events.DeploymentNewBugEffectDefined:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !exists || (deployment.Status != model.DeploymentStatusLocked && deployment.Status != model.DeploymentStatusAvailable) ||
+			event.BugID == "" || !validPage(event.Page) || event.FailureProbabilityPPM > ProbabilityScale ||
+			event.FixMessage == "" || event.FixMessageHash == "" || !event.DefinedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid deployment new-bug effect", ErrInvalidEvent)
+		}
+		if event.ProductID != "" {
+			if _, exists := s.Products[event.ProductID]; !exists {
+				return ErrProductNotFound
+			}
+		}
+		if _, exists := s.Bugs[event.BugID]; exists {
+			return fmt.Errorf("%w: bug %q already exists", ErrInvalidEvent, event.BugID)
+		}
+		for _, effects := range s.DeploymentNewBugEffects {
+			for _, effect := range effects {
+				if effect.BugID == event.BugID {
+					return fmt.Errorf("%w: future bug %q already exists", ErrInvalidEvent, event.BugID)
+				}
+			}
+		}
+		s.DeploymentNewBugEffects[event.DeploymentID] = append(s.DeploymentNewBugEffects[event.DeploymentID], DeploymentNewBugEffectState{
+			BugID: event.BugID, Page: event.Page, ProductID: event.ProductID,
+			FailureProbabilityPPM: event.FailureProbabilityPPM, FixMessage: event.FixMessage, FixMessageHash: event.FixMessageHash,
+		})
+		return nil
+
 	case events.BackendScaleRequested:
 		if err := ensureRunning(*s); err != nil {
 			return err
@@ -434,6 +480,21 @@ func (s *State) Apply(event events.Event) error {
 		}
 		bug.FailureProbabilityPPM = event.NewProbabilityPPM
 		s.Bugs[event.BugID] = bug
+		return nil
+
+	case events.DeploymentDurationChanged:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		source, sourceExists := s.Deployments[event.SourceDeploymentID]
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !sourceExists || source.Status != model.DeploymentStatusApplied || !exists || deployment.Status != model.DeploymentStatusLocked ||
+			deployment.Duration != event.OldDuration || event.NewDuration <= 0 || event.NewDuration > event.OldDuration ||
+			!event.ChangedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid deployment-duration change", ErrInvalidEvent)
+		}
+		deployment.Duration = event.NewDuration
+		s.Deployments[event.DeploymentID] = deployment
 		return nil
 
 	case events.OperationSucceeded:
@@ -760,6 +821,19 @@ func (s *State) Apply(event events.Event) error {
 		s.Economy.ServerCostMinor += event.AmountMinor
 		return nil
 
+	case events.EconomyConfigured:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.InitialBalanceMinor <= 0 || !event.StopRunOnNegativeBalance || event.ServerBillingPeriod <= 0 ||
+			!event.ConfiguredAt.Equal(s.Clock.CurrentTime) || s.Economy.InitialBalanceMinor != 0 {
+			return fmt.Errorf("%w: invalid economy configuration", ErrInvalidEvent)
+		}
+		s.Economy.InitialBalanceMinor = event.InitialBalanceMinor
+		s.Economy.StopRunOnNegative = event.StopRunOnNegativeBalance
+		s.Economy.ServerBillingPeriod = event.ServerBillingPeriod
+		return nil
+
 	case events.DeploymentCostAccrued:
 		if err := ensureRunExists(*s); err != nil {
 			return err
@@ -793,12 +867,39 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: visitor already exists", ErrInvalidEvent)
 		}
 		s.Visitors[event.VisitorID] = VisitorState{ID: event.VisitorID, ArrivedAt: event.ArrivedAt}
-		if s.ScheduleCursor < len(s.Schedule) {
-			next := s.Schedule[s.ScheduleCursor]
-			if next.OccursAt.Equal(event.ArrivedAt) && reflect.DeepEqual(next.Event, event) {
-				s.ScheduleCursor++
-			}
+		s.markScheduled(event, event.ArrivedAt)
+		return nil
+
+	case events.TrafficAttackStarted:
+		if err := ensureRunExists(*s); err != nil {
+			return err
 		}
+		if event.AttackID == "" || event.Kind != model.AttackDDoS || !validPage(event.TargetPage) ||
+			event.RequestsPerMinute <= 0 || event.LoadUnitsPerRequest <= 0 ||
+			(event.Resolution != model.AttackScaleOrExpiry && event.Resolution != model.AttackFixOrExpiry && event.Resolution != model.AttackExpiryOnly) ||
+			!event.ExpectedEndAt.After(event.StartedAt) || !validFactTime(*s, event.StartedAt) {
+			return fmt.Errorf("%w: invalid traffic attack", ErrInvalidEvent)
+		}
+		if _, exists := s.ActiveAttacks[event.AttackID]; exists {
+			return fmt.Errorf("%w: attack already active", ErrInvalidEvent)
+		}
+		s.ActiveAttacks[event.AttackID] = AttackState{ID: event.AttackID, Kind: event.Kind, TargetPage: event.TargetPage,
+			RequestsPerMinute: event.RequestsPerMinute, LoadUnitsPerRequest: event.LoadUnitsPerRequest,
+			Resolution: event.Resolution, ExpectedEndAt: event.ExpectedEndAt, FixMessage: event.FixMessage,
+			FixMessageHash: event.FixMessageHash, StartedAt: event.StartedAt}
+		s.markScheduled(event, event.StartedAt)
+		return nil
+
+	case events.TrafficAttackEnded:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		attack, exists := s.ActiveAttacks[event.AttackID]
+		if !exists || event.EndedAt.Before(attack.ExpectedEndAt) || !validFactTime(*s, event.EndedAt) {
+			return fmt.Errorf("%w: traffic attack cannot end", ErrInvalidEvent)
+		}
+		delete(s.ActiveAttacks, event.AttackID)
+		s.markScheduled(event, event.EndedAt)
 		return nil
 
 	case events.ProductSelected:
@@ -844,6 +945,16 @@ func (s *State) recordCommand(commandID model.CommandID, payload string) error {
 	}
 	s.CommandPayloads[commandID] = payload
 	return nil
+}
+
+func (s *State) markScheduled(event events.Event, occursAt time.Time) {
+	if s.ScheduleCursor >= len(s.Schedule) {
+		return
+	}
+	next := s.Schedule[s.ScheduleCursor]
+	if next.OccursAt.Equal(occursAt) && reflect.DeepEqual(next.Event, event) {
+		s.ScheduleCursor++
+	}
 }
 
 func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time) int64 {

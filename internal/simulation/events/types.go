@@ -24,6 +24,7 @@ type RevenueLossReason = model.RevenueLossReason
 type VisitorOutcome = model.VisitorOutcome
 type OperationKind = model.OperationKind
 type AttackKind = model.AttackKind
+type AttackResolution = model.AttackResolution
 
 type ScheduledWorldEvent struct {
 	Sequence uint64

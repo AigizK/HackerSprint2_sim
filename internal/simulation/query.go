@@ -136,7 +136,7 @@ func (q *QueryService) Overview(runID string) (OverviewView, error) {
 	return OverviewView{SimulationTime: state.Clock.CurrentTime, SimulationEndsAt: state.Clock.EndsAt, Remaining: remaining,
 		RunStatus: string(state.Status), SiteStatus: site, CurrentDeploymentID: state.ActiveDeployment,
 		ServerCount: metrics.ServerCount, CapacityUtilization: util, ErrorRate: metrics.ErrorRate,
-		BalanceMinor: state.Economy.RevenueMinor - state.Economy.ServerCostMinor - state.Economy.DeploymentCostMinor}, nil
+		BalanceMinor: state.Economy.InitialBalanceMinor + state.Economy.RevenueMinor - state.Economy.ServerCostMinor - state.Economy.DeploymentCostMinor}, nil
 }
 
 func (q *QueryService) Metrics(runID string, query MetricsQuery) (MetricsView, error) {
@@ -352,7 +352,7 @@ func (q *QueryService) Economy(runID string) (EconomyView, error) {
 		return EconomyView{}, e
 	}
 	v := EconomyView{SuccessfulPurchases: s.Economy.SuccessfulPurchases, LostPurchases: s.Economy.LostPurchases, RevenueMinor: s.Economy.RevenueMinor, LostRevenueMinor: s.Economy.LostRevenueMinor, ServerCostMinor: s.Economy.ServerCostMinor, DeploymentCostMinor: s.Economy.DeploymentCostMinor}
-	v.BalanceMinor = v.RevenueMinor - v.ServerCostMinor - v.DeploymentCostMinor
+	v.BalanceMinor = s.Economy.InitialBalanceMinor + v.RevenueMinor - v.ServerCostMinor - v.DeploymentCostMinor
 	return v, nil
 }
 func (q *QueryService) Operation(runID string, id model.OperationID) (OperationView, error) {

@@ -124,3 +124,11 @@ const (
 	AttackDDoS       AttackKind = "ddos"
 	AttackBruteForce AttackKind = "brute_force"
 )
+
+type AttackResolution string
+
+const (
+	AttackScaleOrExpiry AttackResolution = "scale_or_expiry"
+	AttackFixOrExpiry   AttackResolution = "fix_or_expiry"
+	AttackExpiryOnly    AttackResolution = "expiry_only"
+)
