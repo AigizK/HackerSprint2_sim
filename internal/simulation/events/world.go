@@ -19,6 +19,13 @@ type InfrastructureConfigured struct {
 
 func (InfrastructureConfigured) EventType() string { return "InfrastructureConfigured" }
 
+type WorldScheduleCreated struct {
+	Schedule  EventSchedule
+	CreatedAt time.Time
+}
+
+func (WorldScheduleCreated) EventType() string { return "WorldScheduleCreated" }
+
 type RunEnded struct {
 	CompletedAt time.Time
 	Reason      string

@@ -1,0 +1,196 @@
+package spec_test
+
+import (
+	"testing"
+	"time"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/logs"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
+	"github.com/aigizk/hackersprint2-sim/spec"
+)
+
+func TestOverviewIsDerivedFromStateAndRequestHistory(t *testing.T) {
+	s := newCapacityScenario(t, "run-overview", 60)
+	s.When(
+		s.User.OpensPage("overview-success", "visitor-1", model.PageProductList, ""),
+		s.User.OpensPage("overview-error", "visitor-2", model.PageProductList, ""),
+	)
+
+	s.Then(s.Future.Overview(spec.OverviewView{
+		SimulationTime:      worldStartsAt,
+		SimulationEndsAt:    worldStartsAt.Add(24 * time.Hour),
+		Remaining:           24 * time.Hour,
+		RunStatus:           "running",
+		SiteStatus:          "degraded",
+		ServerCount:         1,
+		CapacityUtilization: 0.6,
+		ErrorRate:           0.5,
+		BalanceMinor:        0,
+	}))
+}
+
+func TestOverviewIsUnavailableDuringDeployment(t *testing.T) {
+	s := newDeploymentScenario(t, "run-overview-unavailable", 50, 0)
+	s.When(s.Deployment.Start("overview-deployment", firstDeploymentID, "overview-operation"))
+
+	s.Then(s.Future.Overview(spec.OverviewView{
+		SimulationTime:      worldStartsAt,
+		SimulationEndsAt:    worldStartsAt.Add(24 * time.Hour),
+		Remaining:           24 * time.Hour,
+		RunStatus:           "running",
+		SiteStatus:          "unavailable",
+		CurrentDeploymentID: firstDeploymentID,
+		ServerCount:         1,
+	}))
+}
+
+func TestOverviewForCompletedRunHasNoRemainingTime(t *testing.T) {
+	s := spec.New(t, "run-overview-completed")
+	s.Given(s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)))
+	s.When(s.Time.Advance(0, 24*time.Hour))
+
+	s.Then(s.Future.Overview(spec.OverviewView{
+		SimulationTime:   worldStartsAt.Add(24 * time.Hour),
+		SimulationEndsAt: worldStartsAt.Add(24 * time.Hour),
+		RunStatus:        "completed",
+		SiteStatus:       "unavailable",
+	}))
+}
+
+func TestMetricsSnapshotUsesStateAndAccumulatedRequestEvents(t *testing.T) {
+	s := newCapacityScenario(t, "run-metrics-snapshot", 60)
+	s.When(
+		s.User.OpensPage("metrics-success", "visitor-1", model.PageProductList, ""),
+		s.User.OpensPage("metrics-error", "visitor-2", model.PageProductList, ""),
+	)
+
+	s.Then(s.Future.Metrics(spec.MetricsQuery{}, spec.MetricsView{Current: spec.MetricSnapshotView{
+		ServerCount:    1,
+		CapacityUnits:  100,
+		UsedLoadUnits:  60,
+		ActiveRequests: 1,
+		Responses200:   1,
+		Responses500:   1,
+		ErrorRate:      0.5,
+		ByPage: []spec.PageMetricView{{
+			Page: model.PageProductList, ActiveRequests: 1, UsedLoadUnits: 60,
+			Responses200: 1, Responses500: 1, ErrorRate: 0.5,
+		}},
+	}}))
+}
+
+func TestMetricsBuildTimeBucketsAndLatencyPercentiles(t *testing.T) {
+	s := spec.New(t, "run-metrics-series")
+	s.Given(
+		s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)),
+		s.User.RecordedResponse("latency-1", "visitor-1", model.PageProductList, 200, 100*time.Millisecond),
+		s.User.RecordedResponse("latency-2", "visitor-2", model.PageProductList, 500, 900*time.Millisecond),
+	)
+
+	s.Then(s.Future.Metrics(
+		spec.MetricsQuery{
+			From: worldStartsAt, To: worldStartsAt.Add(time.Minute), Step: time.Minute,
+			Names: []string{"responses_200", "responses_500", "latency_p50_ms", "latency_p95_ms"},
+			Page:  model.PageProductList,
+		},
+		spec.MetricsView{
+			Current: spec.MetricSnapshotView{
+				Responses200: 1, Responses500: 1, ErrorRate: 0.5,
+				LatencyP50: 100 * time.Millisecond, LatencyP95: 900 * time.Millisecond,
+			},
+			Series: []spec.MetricPointView{
+				{Timestamp: worldStartsAt, Name: "responses_200", Page: model.PageProductList, Value: 1},
+				{Timestamp: worldStartsAt, Name: "responses_500", Page: model.PageProductList, Value: 1},
+			},
+		},
+	))
+}
+
+func TestLogsSupportEnrichedFieldsFiltersAndCursorPagination(t *testing.T) {
+	s := newCapacityScenario(t, "run-logs-query", 60)
+	s.When(
+		s.User.OpensPage("logs-success", "visitor-1", model.PageProductList, ""),
+		s.User.OpensPage("logs-error", "visitor-2", model.PageProductList, ""),
+	)
+
+	s.Then(s.Future.Logs(
+		spec.LogsQuery{
+			From: worldStartsAt, To: worldStartsAt, Page: model.PageProductList,
+			StatusCode: 200, Limit: 1,
+		},
+		spec.LogsView{
+			Logs: []spec.RequestLogView{{
+				Entry: logs.Entry{
+					Timestamp: worldStartsAt, RequestID: "logs-success", Source: model.RequestSourceVisitor,
+					VisitorID: "visitor-1", Page: model.PageProductList, StatusCode: 200,
+				},
+				LoadUnits: 60, ServerID: capacityServerID,
+			}},
+			NextCursor: "opaque-next-cursor",
+		},
+	))
+
+	s.Then(s.Future.Logs(
+		spec.LogsQuery{
+			From: worldStartsAt, To: worldStartsAt, Page: model.PageProductList,
+			StatusCode: 500, Cursor: "opaque-next-cursor", Limit: 1,
+		},
+		spec.LogsView{Logs: []spec.RequestLogView{{
+			Entry: logs.Entry{
+				Timestamp: worldStartsAt, RequestID: "logs-error", Source: model.RequestSourceVisitor,
+				VisitorID: "visitor-2", Page: model.PageProductList, StatusCode: 500,
+				ErrorCode: model.FailureServerCapacityExceeded,
+				Message:   "server capacity exceeded: required=60 available=40",
+			},
+			LoadUnits: 60,
+		}}},
+	))
+}
+
+func TestResourcesAreDerivedFromServerAndAllocationState(t *testing.T) {
+	s := newCapacityScenario(t, "run-resources", 60)
+	s.When(s.User.OpensPage("resources-request", "visitor-1", model.PageProductList, ""))
+	s.When(s.Server.Add("resources-add", "resources-operation", secondServerID, 100, 1_000))
+
+	s.Then(s.Future.Resources(spec.ResourcesView{
+		DesiredInstances:      2,
+		ActiveInstances:       1,
+		TotalCapacityUnits:    100,
+		UsedLoadUnits:         60,
+		TotalCostPerHourMinor: 1_000,
+		Servers: []spec.ServerResourceView{
+			{ServerID: capacityServerID, Status: model.ServerActive, CapacityUnits: 100, UsedLoadUnits: 60, CostPerHourMinor: 1_000},
+			{ServerID: secondServerID, Status: model.ServerProvisioning, CapacityUnits: 100, CostPerHourMinor: 1_000},
+		},
+	}))
+}
+
+func TestResourcesExcludeExpiredAllocationsAndDrainingCapacity(t *testing.T) {
+	t.Run("expired allocation", func(t *testing.T) {
+		s := newCapacityScenario(t, "run-resources-expired", 100)
+		s.When(s.User.OpensPage("resource-expiring", "visitor-1", model.PageProductList, ""))
+		s.When(s.Time.Advance(0, capacityHoldDuration))
+		s.Then(s.Future.Resources(spec.ResourcesView{
+			DesiredInstances: 1, ActiveInstances: 1, TotalCapacityUnits: 100,
+			UsedLoadUnits: 0, TotalCostPerHourMinor: 1_000,
+			Servers: []spec.ServerResourceView{{
+				ServerID: capacityServerID, Status: model.ServerActive,
+				CapacityUnits: 100, UsedLoadUnits: 0, CostPerHourMinor: 1_000,
+			}},
+		}))
+	})
+
+	t.Run("draining server", func(t *testing.T) {
+		s := newCapacityScenario(t, "run-resources-draining", 100)
+		s.When(s.User.OpensPage("resource-draining", "visitor-1", model.PageProductList, ""))
+		s.When(s.Server.Remove("remove-draining", "remove-draining-operation", capacityServerID))
+		s.Then(s.Future.Resources(spec.ResourcesView{
+			DesiredInstances: 0, ActiveInstances: 0, TotalCapacityUnits: 0,
+			UsedLoadUnits: 100, TotalCostPerHourMinor: 1_000,
+			Servers: []spec.ServerResourceView{{
+				ServerID: capacityServerID, Status: model.ServerDraining,
+				CapacityUnits: 100, UsedLoadUnits: 100, CostPerHourMinor: 1_000,
+			}},
+		}))
+	})
+}

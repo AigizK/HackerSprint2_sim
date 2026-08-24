@@ -29,12 +29,14 @@ type Scenario struct {
 	engine  *simulation.Engine
 	emitted []events.Event
 	logs    []logs.Entry
+	future  FutureDriver
 
 	World       WorldDSL
 	Product     ProductDSL
 	Page        PageDSL
 	Server      ServerDSL
 	User        UserDSL
+	Visitor     VisitorDSL
 	Bug         BugDSL
 	Deployment  DeploymentDSL
 	Time        TimeDSL
@@ -42,6 +44,7 @@ type Scenario struct {
 	Events      EventsDSL
 	Logs        LogsDSL
 	Deployments DeploymentsDSL
+	Future      FutureDSL
 }
 
 func New(t *testing.T, runID string) *Scenario {
@@ -55,6 +58,7 @@ func New(t *testing.T, runID string) *Scenario {
 		store:   store,
 		handler: simulation.NewHandler(store),
 		engine:  engine,
+		future:  newProjectionDriver(store),
 	}
 	t.Cleanup(engine.Close)
 	s.World = WorldDSL{s: s}
@@ -62,6 +66,7 @@ func New(t *testing.T, runID string) *Scenario {
 	s.Page = PageDSL{s: s}
 	s.Server = ServerDSL{s: s}
 	s.User = UserDSL{s: s}
+	s.Visitor = VisitorDSL{s: s}
 	s.Bug = BugDSL{s: s}
 	s.Deployment = DeploymentDSL{s: s}
 	s.Time = TimeDSL{s: s}
@@ -69,6 +74,7 @@ func New(t *testing.T, runID string) *Scenario {
 	s.Events = EventsDSL{s: s}
 	s.Logs = LogsDSL{s: s}
 	s.Deployments = DeploymentsDSL{s: s}
+	s.Future = FutureDSL{s: s}
 	return s
 }
 
@@ -174,6 +180,16 @@ func (d WorldDSL) InfrastructureConfigured(serverProvisioningDuration time.Durat
 			ServerProvisioningDuration: serverProvisioningDuration,
 			ConfiguredAt:               state.Clock.CurrentTime,
 		})
+	}
+}
+
+func (d WorldDSL) Schedule(schedule events.EventSchedule) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.WorldScheduleCreated{Schedule: schedule, CreatedAt: state.Clock.CurrentTime})
 	}
 }
 
@@ -285,6 +301,14 @@ func (d ServerDSL) Remove(commandID model.CommandID, operationID model.Operation
 	}
 }
 
+func (d ServerDSL) SetDesired(commandID model.CommandID, operationID model.OperationID, desiredInstances int) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.SetBackendDesiredInstances{
+			CommandID: commandID, OperationID: operationID, DesiredInstances: desiredInstances,
+		})
+	}
+}
+
 type TimeDSL struct{ s *Scenario }
 
 func (d TimeDSL) Advance(realElapsed, requested time.Duration) Step {
@@ -293,6 +317,20 @@ func (d TimeDSL) Advance(realElapsed, requested time.Duration) Step {
 			RealElapsed:       realElapsed,
 			RequestedDuration: requested,
 		})
+	}
+}
+
+func (d TimeDSL) AdvanceRequest(commandID model.CommandID, realElapsed, requested time.Duration) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.AdvanceTime{
+			CommandID: commandID, RealElapsed: realElapsed, RequestedDuration: requested,
+		})
+	}
+}
+
+func (d TimeDSL) SynchronizeRequest(commandID model.CommandID, realElapsed time.Duration) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.SynchronizeRealTime{CommandID: commandID, RealElapsed: realElapsed})
 	}
 }
 
@@ -305,6 +343,50 @@ func (d UserDSL) OpensPage(requestID model.RequestID, visitorID model.VisitorID,
 			VisitorID: visitorID,
 			Page:      page,
 			ProductID: productID,
+		})
+	}
+}
+
+type VisitorDSL struct{ s *Scenario }
+
+func (d VisitorDSL) Arrives(visitorID model.VisitorID) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.SimulateVisitor{VisitorID: visitorID})
+	}
+}
+
+func (d UserDSL) ProbesPage(requestID model.RequestID, page model.PageType, productID model.ProductID) Step {
+	return func(s *Scenario) error {
+		return s.execute(simulation.ProbePage{RequestID: requestID, Page: page, ProductID: productID})
+	}
+}
+
+func (d UserDSL) RecordedResponse(
+	requestID model.RequestID,
+	visitorID model.VisitorID,
+	page model.PageType,
+	statusCode int,
+	latency time.Duration,
+) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		if err := s.appendGiven(events.PageRequestStarted{
+			RequestID: requestID,
+			Source:    model.RequestSourceVisitor,
+			VisitorID: visitorID,
+			Page:      page,
+			StartedAt: state.Clock.CurrentTime,
+		}); err != nil {
+			return err
+		}
+		return s.appendGiven(events.PageRequestCompleted{
+			RequestID:   requestID,
+			StatusCode:  statusCode,
+			Latency:     latency,
+			CompletedAt: state.Clock.CurrentTime,
 		})
 	}
 }
@@ -348,6 +430,17 @@ func (d DeploymentDSL) Defined(
 	duration time.Duration,
 	failureProbabilityPPM uint32,
 ) Step {
+	return d.DefinedWithCost(id, sequence, name, 0, duration, failureProbabilityPPM)
+}
+
+func (d DeploymentDSL) DefinedWithCost(
+	id model.DeploymentID,
+	sequence int,
+	name string,
+	costMinor int64,
+	duration time.Duration,
+	failureProbabilityPPM uint32,
+) Step {
 	return func(s *Scenario) error {
 		state, err := s.state()
 		if err != nil {
@@ -358,6 +451,7 @@ func (d DeploymentDSL) Defined(
 			Sequence:              sequence,
 			Name:                  name,
 			Description:           name,
+			CostMinor:             costMinor,
 			Duration:              duration,
 			FailureProbabilityPPM: failureProbabilityPPM,
 			DefinedAt:             state.Clock.CurrentTime,
@@ -459,6 +553,19 @@ func (d StateDSL) HasProduct(want simulation.ProductState) Assertion {
 		}
 		if !reflect.DeepEqual(got, want) {
 			return fmt.Errorf("product = %#v, want %#v", got, want)
+		}
+		return nil
+	}
+}
+
+func (d StateDSL) HasNoProduct(id simulation.ProductID) Assertion {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		if _, exists := state.Products[id]; exists {
+			return fmt.Errorf("product %q unexpectedly exists", id)
 		}
 		return nil
 	}
@@ -572,6 +679,15 @@ func (d EventsDSL) HasNoType(eventType string) Assertion {
 			if event.EventType() == eventType {
 				return fmt.Errorf("emitted events unexpectedly contain %s: %#v", eventType, s.emitted)
 			}
+		}
+		return nil
+	}
+}
+
+func (d EventsDSL) EqualTo(other *Scenario) Assertion {
+	return func(s *Scenario) error {
+		if !reflect.DeepEqual(s.emitted, other.emitted) {
+			return fmt.Errorf("emitted events = %#v, other = %#v", s.emitted, other.emitted)
 		}
 		return nil
 	}

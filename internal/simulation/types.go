@@ -3,6 +3,7 @@ package simulation
 import (
 	"time"
 
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
@@ -40,6 +41,10 @@ type ProductState struct {
 type EconomyState struct {
 	RevenueMinor        int64
 	SuccessfulPurchases uint64
+	LostPurchases       uint64
+	LostRevenueMinor    int64
+	ServerCostMinor     int64
+	DeploymentCostMinor int64
 }
 
 type PurchaseState struct {
@@ -91,6 +96,7 @@ type ServerState struct {
 	StartedAt        time.Time
 	ReadyAt          time.Time
 	ActivatedAt      time.Time
+	BilledHours      int64
 }
 
 type CapacityAllocationState struct {
@@ -107,6 +113,16 @@ type OperationState struct {
 	Status      model.OperationLifecycleStatus
 	QueuedAt    time.Time
 	StartedAt   time.Time
+	CompletedAt time.Time
+	ErrorCode   string
+	Message     string
+}
+
+type VisitorState struct {
+	ID          model.VisitorID
+	ProductID   ProductID
+	Outcome     model.VisitorOutcome
+	ArrivedAt   time.Time
 	CompletedAt time.Time
 }
 
@@ -170,11 +186,16 @@ type State struct {
 	Capacity                  map[model.RequestID]CapacityAllocationState
 	Operations                map[model.OperationID]OperationState
 	Commands                  map[model.CommandID]model.OperationID
+	CommandPayloads           map[model.CommandID]string
 	Deployments               map[model.DeploymentID]DeploymentState
 	DeploymentPageLoadEffects map[model.DeploymentID][]DeploymentPageLoadEffectState
 	DeploymentBugEffects      map[model.DeploymentID][]DeploymentBugProbabilityEffectState
 	ActiveDeployment          model.DeploymentID
 	Requests                  map[model.RequestID]PageRequestState
+	Visitors                  map[model.VisitorID]VisitorState
+	Schedule                  events.EventSchedule
+	ScheduleCursor            int
+	DesiredInstances          int
 	Economy                   EconomyState
 }
 
@@ -190,9 +211,11 @@ func NewState() State {
 		Capacity:                  make(map[model.RequestID]CapacityAllocationState),
 		Operations:                make(map[model.OperationID]OperationState),
 		Commands:                  make(map[model.CommandID]model.OperationID),
+		CommandPayloads:           make(map[model.CommandID]string),
 		Deployments:               make(map[model.DeploymentID]DeploymentState),
 		DeploymentPageLoadEffects: make(map[model.DeploymentID][]DeploymentPageLoadEffectState),
 		DeploymentBugEffects:      make(map[model.DeploymentID][]DeploymentBugProbabilityEffectState),
 		Requests:                  make(map[model.RequestID]PageRequestState),
+		Visitors:                  make(map[model.VisitorID]VisitorState),
 	}
 }

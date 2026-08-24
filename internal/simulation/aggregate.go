@@ -27,6 +27,14 @@ func Rehydrate(records []StoredEvent) (State, error) {
 }
 
 func Decide(runID string, state State, command Command) ([]events.Event, error) {
+	if commandID, payload := commandReceipt(command); commandID != "" {
+		if previous, exists := state.CommandPayloads[commandID]; exists {
+			if previous != payload {
+				return nil, ErrIdempotencyConflict
+			}
+			return nil, nil
+		}
+	}
 	switch command := command.(type) {
 	case CreateWorld:
 		if state.Status != RunNotCreated {
@@ -111,49 +119,72 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		}
 		to := state.Clock.CurrentTime.Add(applied)
 		result := []events.Event{events.TimeAdvanced{
+			CommandID:         command.CommandID,
 			From:              state.Clock.CurrentTime,
 			To:                to,
 			RealElapsed:       command.RealElapsed,
 			RequestedDuration: command.RequestedDuration,
 			AppliedDuration:   applied,
 		}}
+		result = append(result, infrastructureCostEvents(state, state.Clock.CurrentTime, to)...)
 		if deployment, exists := state.Deployments[state.ActiveDeployment]; exists &&
 			!deployment.ExpectedCompletionAt.After(to) {
 			result = append(result, deploymentCompletionEvents(state, deployment, to)...)
 		}
+		completedOperations := make(map[model.OperationID]bool)
 		for _, server := range sortedProvisioningServers(state) {
 			if server.ReadyAt.After(to) {
 				continue
 			}
-			result = append(result,
-				events.ServerActivated{
-					OperationID: server.OperationID,
-					ServerID:    server.ID,
-					ActivatedAt: to,
-				},
-				events.OperationSucceeded{
-					OperationID: server.OperationID,
-					CompletedAt: to,
-				},
-			)
+			result = append(result, events.ServerActivated{
+				OperationID: server.OperationID,
+				ServerID:    server.ID,
+				ActivatedAt: to,
+			})
+			completedOperations[server.OperationID] = true
 		}
+		for operationID := range completedOperations {
+			result = append(result, events.OperationSucceeded{OperationID: operationID, CompletedAt: to})
+		}
+		removedOperations := make(map[model.OperationID]bool)
 		for _, server := range sortedDrainingServers(state) {
 			if serverHasLoad(state, server.ID, to) {
 				continue
 			}
-			result = append(result,
-				events.ServerRemoved{
-					OperationID: server.OperationID,
-					ServerID:    server.ID,
-					RemovedAt:   to,
-				},
-				events.OperationSucceeded{
-					OperationID: server.OperationID,
-					CompletedAt: to,
-				},
-			)
+			result = append(result, events.ServerRemoved{
+				OperationID: server.OperationID,
+				ServerID:    server.ID,
+				RemovedAt:   to,
+			})
+			removedOperations[server.OperationID] = true
+		}
+		for operationID := range removedOperations {
+			allRemoved := true
+			for _, server := range state.Servers {
+				if server.OperationID == operationID && server.Status == model.ServerDraining && serverHasLoad(state, server.ID, to) {
+					allRemoved = false
+				}
+			}
+			if allRemoved {
+				result = append(result, events.OperationSucceeded{OperationID: operationID, CompletedAt: to})
+			}
+		}
+		for _, scheduled := range pendingScheduledEvents(state, to) {
+			result = append(result, scheduled.Event)
+			if arrival, ok := scheduled.Event.(events.VisitorArrived); ok && len(state.Products) > 0 {
+				journey, err := decideVisitor(state, arrival.VisitorID, arrival.ArrivedAt, true)
+				if err != nil {
+					return nil, err
+				}
+				if len(journey) > 0 {
+					result = append(result, journey[1:]...)
+				}
+			}
 		}
 		return result, nil
+
+	case SynchronizeRealTime:
+		return Decide(runID, state, AdvanceTime{CommandID: command.CommandID, RealElapsed: command.RealElapsed})
 
 	case OpenPage:
 		if err := ensureRunning(state); err != nil {
@@ -258,8 +289,11 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		if command.CommandID == "" || strings.TrimSpace(command.Message) == "" {
 			return nil, fmt.Errorf("%w: invalid fix command", ErrInvalidCommand)
 		}
-		if _, exists := state.Fixes[command.CommandID]; exists {
-			return nil, fmt.Errorf("%w: fix command %q already exists", ErrInvalidCommand, command.CommandID)
+		if previous, exists := state.Fixes[command.CommandID]; exists {
+			if previous.Message == command.Message {
+				return nil, nil
+			}
+			return nil, ErrIdempotencyConflict
 		}
 
 		result := []events.Event{events.BugFixSubmitted{
@@ -420,6 +454,11 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 				ExpectedCompletionAt: state.Clock.CurrentTime.Add(deployment.Duration),
 			},
 		}
+		if deployment.CostMinor > 0 {
+			result = append(result, events.DeploymentCostAccrued{
+				DeploymentID: deployment.ID, AmountMinor: deployment.CostMinor, AccruedAt: state.Clock.CurrentTime,
+			})
+		}
 		requestIDs := make([]string, 0, len(state.Capacity))
 		for requestID, allocation := range state.Capacity {
 			if allocation.ReleasesAt.After(state.Clock.CurrentTime) {
@@ -438,6 +477,34 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		}
 		return result, nil
 
+	case ProbePage:
+		generated, err := Decide(runID, state, OpenPage{
+			RequestID: command.RequestID, VisitorID: "__probe__", Page: command.Page, ProductID: command.ProductID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		result := make([]events.Event, 0, len(generated))
+		for _, event := range generated {
+			switch event := event.(type) {
+			case events.PageRequestStarted:
+				event.Source = model.RequestSourceProbe
+				event.VisitorID = ""
+				result = append(result, event)
+			case events.ProductPurchased:
+				// Probes test availability but never create business revenue.
+			default:
+				result = append(result, event)
+			}
+		}
+		return result, nil
+
+	case SimulateVisitor:
+		return decideVisitor(state, command.VisitorID, state.Clock.CurrentTime, true)
+
+	case SetBackendDesiredInstances:
+		return decideDesiredInstances(state, command)
+
 	default:
 		return nil, fmt.Errorf("%w: unsupported command %T", ErrInvalidCommand, command)
 	}
@@ -445,6 +512,23 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 
 func validPage(page model.PageType) bool {
 	return page == model.PageProductList || page == model.PageProduct || page == model.PagePurchase
+}
+
+func commandReceipt(command Command) (model.CommandID, string) {
+	switch command := command.(type) {
+	case AdvanceTime:
+		return command.CommandID, fmt.Sprintf("time:%d:%d", command.RealElapsed, command.RequestedDuration)
+	case SynchronizeRealTime:
+		return command.CommandID, fmt.Sprintf("time:%d:0", command.RealElapsed)
+	case ApplyFix:
+		return command.CommandID, "fix:" + command.Message
+	case StartDeployment:
+		return command.CommandID, fmt.Sprintf("deployment:%s:%s", command.DeploymentID, command.OperationID)
+	case SetBackendDesiredInstances:
+		return command.CommandID, fmt.Sprintf("scale:%s:%d", command.OperationID, command.DesiredInstances)
+	default:
+		return "", ""
+	}
 }
 
 func triggeredBug(state State, command OpenPage) (BugState, bool) {
@@ -653,6 +737,246 @@ func probabilityHit(seed int64, bugID model.BugID, requestID model.RequestID, pr
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", seed, bugID, requestID)))
 	roll := binary.BigEndian.Uint64(digest[:8]) % uint64(ProbabilityScale)
 	return roll < uint64(probability)
+}
+
+func deterministicRoll(seed int64, parts ...string) uint32 {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s", seed, strings.Join(parts, ":"))))
+	return uint32(binary.BigEndian.Uint64(digest[:8]) % uint64(ProbabilityScale))
+}
+
+func decideVisitor(state State, visitorID model.VisitorID, at time.Time, includeArrival bool) ([]events.Event, error) {
+	if err := ensureRunning(state); err != nil {
+		return nil, err
+	}
+	if visitorID == "" {
+		return nil, fmt.Errorf("%w: visitor id is required", ErrInvalidCommand)
+	}
+	working := state
+	working.Clock.CurrentTime = at
+	result := make([]events.Event, 0, 16)
+	appendEvents := func(items ...events.Event) error {
+		for _, event := range items {
+			if err := working.Apply(event); err != nil {
+				return err
+			}
+			result = append(result, event)
+		}
+		return nil
+	}
+	if includeArrival {
+		if err := appendEvents(events.VisitorArrived{VisitorID: visitorID, ArrivedAt: at}); err != nil {
+			return nil, err
+		}
+	}
+	listEvents, err := Decide("", working, OpenPage{
+		RequestID: model.RequestID(string(visitorID) + ":product_list"), VisitorID: visitorID, Page: model.PageProductList,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := appendEvents(listEvents...); err != nil {
+		return nil, err
+	}
+	if requestFailed(listEvents) {
+		return appendJourneyFailure(result, working, visitorID, ProductState{}, model.RequestID(string(visitorID)+":product_list"), at), nil
+	}
+
+	products := make([]ProductState, 0, len(working.Products))
+	for _, product := range working.Products {
+		products = append(products, product)
+	}
+	sort.Slice(products, func(i, j int) bool { return products[i].ID < products[j].ID })
+	roll := deterministicRoll(working.Seed, string(visitorID), "product")
+	var selected ProductState
+	var cumulative uint64
+	for _, product := range products {
+		cumulative += uint64(product.ViewProbabilityPPM)
+		if uint64(roll) < cumulative {
+			selected = product
+			break
+		}
+	}
+	if selected.ID == "" {
+		completion := events.VisitorJourneyCompleted{VisitorID: visitorID, Outcome: model.VisitorLeftAfterProductList, CompletedAt: at}
+		_ = appendEvents(completion)
+		return result, nil
+	}
+	if err := appendEvents(events.ProductSelected{VisitorID: visitorID, ProductID: selected.ID, SelectedAt: at}); err != nil {
+		return nil, err
+	}
+	productRequestID := model.RequestID(string(visitorID) + ":product_page")
+	productEvents, err := Decide("", working, OpenPage{RequestID: productRequestID, VisitorID: visitorID, Page: model.PageProduct, ProductID: selected.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := appendEvents(productEvents...); err != nil {
+		return nil, err
+	}
+	if requestFailed(productEvents) {
+		return appendJourneyFailure(result, working, visitorID, selected, productRequestID, at), nil
+	}
+	if deterministicRoll(working.Seed, string(visitorID), "purchase") >= selected.PurchaseProbabilityPPM {
+		lost := events.RevenueLost{VisitorID: visitorID, ProductID: selected.ID, AmountMinor: selected.PriceMinor, Reason: model.RevenueLostToAbandonment, LostAt: at}
+		completed := events.VisitorJourneyCompleted{VisitorID: visitorID, Outcome: model.VisitorLeftAfterProductPage, CompletedAt: at}
+		_ = appendEvents(lost, completed)
+		return result, nil
+	}
+	purchaseID := model.PurchaseID(string(visitorID) + ":purchase")
+	if err := appendEvents(events.PurchaseIntentCreated{PurchaseID: purchaseID, VisitorID: visitorID, ProductID: selected.ID, CreatedAt: at}); err != nil {
+		return nil, err
+	}
+	purchaseEvents, err := Decide("", working, OpenPage{RequestID: model.RequestID(purchaseID), VisitorID: visitorID, Page: model.PagePurchase, ProductID: selected.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := appendEvents(purchaseEvents...); err != nil {
+		return nil, err
+	}
+	if requestFailed(purchaseEvents) {
+		return appendJourneyFailure(result, working, visitorID, selected, model.RequestID(purchaseID), at), nil
+	}
+	_ = appendEvents(events.VisitorJourneyCompleted{VisitorID: visitorID, Outcome: model.VisitorPurchased, CompletedAt: at})
+	return result, nil
+}
+
+func requestFailed(items []events.Event) bool {
+	for _, item := range items {
+		switch event := item.(type) {
+		case events.PageRequestRejected:
+			return event.StatusCode >= 400
+		case events.PageRequestCompleted:
+			return event.StatusCode >= 400
+		}
+	}
+	return false
+}
+
+func appendJourneyFailure(result []events.Event, state State, visitorID model.VisitorID, product ProductState, requestID model.RequestID, at time.Time) []events.Event {
+	reason := model.RevenueLostToCapacity
+	if request, exists := state.Requests[requestID]; exists {
+		switch request.ErrorCode {
+		case model.FailurePageBug:
+			reason = model.RevenueLostToPageBug
+		case model.FailureDeployment:
+			reason = model.RevenueLostToDeployment
+		case model.FailureExternalProvider:
+			reason = model.RevenueLostToProvider
+		}
+	}
+	if product.ID != "" {
+		result = append(result, events.RevenueLost{VisitorID: visitorID, ProductID: product.ID, RequestID: requestID, AmountMinor: product.PriceMinor, Reason: reason, LostAt: at})
+	}
+	return append(result, events.VisitorJourneyCompleted{VisitorID: visitorID, Outcome: model.VisitorLeftAfterPageError, CompletedAt: at})
+}
+
+func pendingScheduledEvents(state State, to time.Time) events.EventSchedule {
+	result := make(events.EventSchedule, 0)
+	for i := state.ScheduleCursor; i < len(state.Schedule); i++ {
+		scheduled := state.Schedule[i]
+		if scheduled.OccursAt.After(to) {
+			break
+		}
+		if scheduled.OccursAt.After(state.Clock.CurrentTime) {
+			result = append(result, scheduled)
+		}
+	}
+	return result
+}
+
+func infrastructureCostEvents(state State, from, to time.Time) []events.Event {
+	result := make([]events.Event, 0)
+	for _, server := range state.Servers {
+		if server.Status != model.ServerActive && server.Status != model.ServerDraining {
+			continue
+		}
+		activeFrom := server.ActivatedAt
+		if activeFrom.IsZero() || !activeFrom.Before(to) {
+			continue
+		}
+		duration := to.Sub(activeFrom)
+		hours := int64((duration + time.Hour - 1) / time.Hour)
+		if hours <= server.BilledHours {
+			continue
+		}
+		amount := (hours - server.BilledHours) * server.CostPerHourMinor
+		result = append(result, events.InfrastructureCostAccrued{
+			ServerID: server.ID, From: from, To: to, BilledHours: hours, AmountMinor: amount,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].(events.InfrastructureCostAccrued).ServerID < result[j].(events.InfrastructureCostAccrued).ServerID
+	})
+	return result
+}
+
+func decideDesiredInstances(state State, command SetBackendDesiredInstances) ([]events.Event, error) {
+	if err := ensureRunning(state); err != nil {
+		return nil, err
+	}
+	if command.CommandID == "" || command.OperationID == "" || command.DesiredInstances < 0 {
+		return nil, fmt.Errorf("%w: invalid desired instance command", ErrInvalidCommand)
+	}
+	if err := ensureNewScaleIdentifiers(state, command.CommandID, command.OperationID); err != nil {
+		return nil, err
+	}
+	current := len(state.Servers)
+	result := []events.Event{
+		events.BackendScaleRequested{CommandID: command.CommandID, OperationID: command.OperationID, DesiredInstances: command.DesiredInstances, RequestedAt: state.Clock.CurrentTime},
+		events.OperationQueued{OperationID: command.OperationID, Kind: model.OperationScaleBackend, QueuedAt: state.Clock.CurrentTime},
+		events.OperationStarted{OperationID: command.OperationID, StartedAt: state.Clock.CurrentTime},
+	}
+	if current == command.DesiredInstances {
+		return append(result, events.OperationSucceeded{OperationID: command.OperationID, CompletedAt: state.Clock.CurrentTime}), nil
+	}
+	serverIDs := make([]string, 0, len(state.Servers))
+	for id := range state.Servers {
+		serverIDs = append(serverIDs, string(id))
+	}
+	sort.Strings(serverIDs)
+	if command.DesiredInstances > current {
+		if state.Infrastructure.ServerProvisioningDuration <= 0 {
+			return nil, fmt.Errorf("%w: server provisioning duration is not configured", ErrInvalidCommand)
+		}
+		capacity, cost := int64(100), int64(0)
+		if len(serverIDs) > 0 {
+			template := state.Servers[model.ServerID(serverIDs[0])]
+			capacity, cost = template.CapacityUnits, template.CostPerHourMinor
+		}
+		for i := 1; i <= command.DesiredInstances-current; i++ {
+			serverID := model.ServerID(fmt.Sprintf("server-%s-%d", command.CommandID, i))
+			result = append(result, events.ServerProvisioningStarted{OperationID: command.OperationID, ServerID: serverID, CapacityUnits: capacity, CostPerHourMinor: cost, StartedAt: state.Clock.CurrentTime, ReadyAt: state.Clock.CurrentTime.Add(state.Infrastructure.ServerProvisioningDuration)})
+		}
+		return result, nil
+	}
+	removeCount := current - command.DesiredInstances
+	for i := len(serverIDs) - 1; i >= 0 && removeCount > 0; i-- {
+		server := state.Servers[model.ServerID(serverIDs[i])]
+		if server.Status != model.ServerActive {
+			continue
+		}
+		result = append(result, events.ServerDrainingStarted{OperationID: command.OperationID, ServerID: server.ID, StartedAt: state.Clock.CurrentTime})
+		if !serverHasLoad(state, server.ID, state.Clock.CurrentTime) {
+			result = append(result, events.ServerRemoved{OperationID: command.OperationID, ServerID: server.ID, RemovedAt: state.Clock.CurrentTime})
+		}
+		removeCount--
+	}
+	if removeCount != 0 {
+		return nil, fmt.Errorf("%w: not enough active servers", ErrInvalidCommand)
+	}
+	allImmediate := true
+	for _, event := range result {
+		if _, ok := event.(events.ServerDrainingStarted); ok { /* checked below */
+		}
+	}
+	for _, serverID := range serverIDs {
+		if serverHasLoad(state, model.ServerID(serverID), state.Clock.CurrentTime) {
+			allImmediate = false
+		}
+	}
+	if allImmediate {
+		result = append(result, events.OperationSucceeded{OperationID: command.OperationID, CompletedAt: state.Clock.CurrentTime})
+	}
+	return result, nil
 }
 
 func ensureRunning(state State) error {

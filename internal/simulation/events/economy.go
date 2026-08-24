@@ -3,8 +3,10 @@ package events
 import "time"
 
 type InfrastructureCostAccrued struct {
+	ServerID    ServerID
 	From        time.Time
 	To          time.Time
+	BilledHours int64
 	AmountMinor int64
 }
 

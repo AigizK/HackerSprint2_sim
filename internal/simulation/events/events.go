@@ -36,6 +36,7 @@ type ProductPurchased struct {
 func (ProductPurchased) EventType() string { return "ProductPurchased" }
 
 type TimeAdvanced struct {
+	CommandID         CommandID
 	From              time.Time
 	To                time.Time
 	RealElapsed       time.Duration

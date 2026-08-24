@@ -181,6 +181,10 @@ func TestServerCanBeAdded(t *testing.T) {
 				RequestedDuration: serverProvisioningDuration,
 				AppliedDuration:   serverProvisioningDuration,
 			},
+			events.InfrastructureCostAccrued{
+				ServerID: capacityServerID, From: worldStartsAt, To: worldStartsAt.Add(serverProvisioningDuration),
+				BilledHours: 1, AmountMinor: capacityCostPerHour,
+			},
 			events.ServerActivated{
 				OperationID: addServerOperationID,
 				ServerID:    secondServerID,
@@ -269,6 +273,10 @@ func TestBusyServerIsRemovedOnlyAfterItsLoadIsReleased(t *testing.T) {
 				To:                worldStartsAt.Add(capacityHoldDuration),
 				RequestedDuration: capacityHoldDuration,
 				AppliedDuration:   capacityHoldDuration,
+			},
+			events.InfrastructureCostAccrued{
+				ServerID: capacityServerID, From: worldStartsAt, To: worldStartsAt.Add(capacityHoldDuration),
+				BilledHours: 1, AmountMinor: capacityCostPerHour,
 			},
 			events.ServerRemoved{
 				OperationID: removeOperationID,

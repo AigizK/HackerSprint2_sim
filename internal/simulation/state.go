@@ -3,6 +3,8 @@ package simulation
 import (
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
@@ -21,6 +23,7 @@ var (
 	ErrDeploymentLocked      = errors.New("deployment is locked")
 	ErrDeploymentInProgress  = errors.New("deployment is already in progress")
 	ErrDeploymentApplied     = errors.New("deployment is already applied")
+	ErrIdempotencyConflict   = errors.New("idempotency key was reused with another payload")
 )
 
 func (s *State) Apply(event events.Event) error {
@@ -89,7 +92,7 @@ func (s *State) Apply(event events.Event) error {
 		if _, exists := s.Purchases[event.PurchaseID]; exists {
 			return ErrPurchaseAlreadyExists
 		}
-		if event.PurchaseID == "" || event.PriceMinor != product.PriceMinor || !event.PurchasedAt.Equal(s.Clock.CurrentTime) {
+		if event.PurchaseID == "" || event.PriceMinor != product.PriceMinor || !validFactTime(*s, event.PurchasedAt) {
 			return fmt.Errorf("%w: purchase price does not match product price", ErrInvalidEvent)
 		}
 		s.Purchases[event.PurchaseID] = PurchaseState{
@@ -100,6 +103,30 @@ func (s *State) Apply(event events.Event) error {
 		}
 		s.Economy.RevenueMinor += event.PriceMinor
 		s.Economy.SuccessfulPurchases++
+		return nil
+
+	case events.WorldScheduleCreated:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if !event.CreatedAt.Equal(s.Clock.CurrentTime) || len(s.Schedule) != 0 {
+			return fmt.Errorf("%w: invalid world schedule", ErrInvalidEvent)
+		}
+		schedule := append(events.EventSchedule(nil), event.Schedule...)
+		sort.SliceStable(schedule, func(i, j int) bool {
+			if schedule[i].OccursAt.Equal(schedule[j].OccursAt) {
+				return schedule[i].Sequence < schedule[j].Sequence
+			}
+			return schedule[i].OccursAt.Before(schedule[j].OccursAt)
+		})
+		seen := make(map[uint64]bool)
+		for _, item := range schedule {
+			if item.Sequence == 0 || seen[item.Sequence] || item.Event == nil || item.OccursAt.Before(s.Clock.CurrentTime) || item.OccursAt.After(s.Clock.EndsAt) {
+				return fmt.Errorf("%w: invalid scheduled event", ErrInvalidEvent)
+			}
+			seen[item.Sequence] = true
+		}
+		s.Schedule = schedule
 		return nil
 
 	case events.TimeAdvanced:
@@ -125,6 +152,11 @@ func (s *State) Apply(event events.Event) error {
 		}
 		if event.AppliedDuration != expectedApplied {
 			return fmt.Errorf("%w: applied duration does not follow max(real, requested)", ErrInvalidEvent)
+		}
+		if event.CommandID != "" {
+			if err := s.recordCommand(event.CommandID, fmt.Sprintf("time:%d:%d", event.RealElapsed, event.RequestedDuration)); err != nil {
+				return err
+			}
 		}
 		s.Clock.CurrentTime = event.To
 		if event.To.Equal(s.Clock.EndsAt) {
@@ -274,6 +306,10 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: command %q already exists", ErrInvalidEvent, event.CommandID)
 		}
 		s.Commands[event.CommandID] = event.OperationID
+		if err := s.recordCommand(event.CommandID, fmt.Sprintf("scale:%s:%d", event.OperationID, event.DesiredInstances)); err != nil {
+			return err
+		}
+		s.DesiredInstances = event.DesiredInstances
 		return nil
 
 	case events.OperationQueued:
@@ -326,6 +362,9 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: command %q already exists", ErrInvalidEvent, event.CommandID)
 		}
 		s.Commands[event.CommandID] = event.OperationID
+		if err := s.recordCommand(event.CommandID, fmt.Sprintf("deployment:%s:%s", event.DeploymentID, event.OperationID)); err != nil {
+			return err
+		}
 		deployment.Status = model.DeploymentStatusRunning
 		deployment.OperationID = event.OperationID
 		deployment.StartedAt = event.StartedAt
@@ -421,6 +460,8 @@ func (s *State) Apply(event events.Event) error {
 		}
 		operation.Status = model.OperationStatusFailed
 		operation.CompletedAt = event.FailedAt
+		operation.ErrorCode = event.ErrorCode
+		operation.Message = event.Message
 		s.Operations[event.OperationID] = operation
 		return nil
 
@@ -446,6 +487,9 @@ func (s *State) Apply(event events.Event) error {
 			CostPerHourMinor: event.CostPerHourMinor,
 			StartedAt:        event.StartedAt,
 			ReadyAt:          event.ReadyAt,
+		}
+		if s.DesiredInstances < len(s.Servers) {
+			s.DesiredInstances = len(s.Servers)
 		}
 		return nil
 
@@ -520,7 +564,9 @@ func (s *State) Apply(event events.Event) error {
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
-		if event.RequestID == "" || event.VisitorID == "" || event.LoadUnits < 0 || !event.StartedAt.Equal(s.Clock.CurrentTime) {
+		if event.RequestID == "" || (event.Source == model.RequestSourceVisitor && event.VisitorID == "") ||
+			(event.Source != model.RequestSourceVisitor && event.Source != model.RequestSourceProbe) ||
+			event.LoadUnits < 0 || !validFactTime(*s, event.StartedAt) {
 			return fmt.Errorf("%w: invalid page request event", ErrInvalidEvent)
 		}
 		if page, configured := s.Pages[event.Page]; configured && event.LoadUnits != page.LoadUnits {
@@ -553,7 +599,7 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: request %q cannot be accepted", ErrInvalidEvent, event.RequestID)
 		}
 		server, exists := s.Servers[event.ServerID]
-		if !exists || server.Status != model.ServerActive || !event.AcceptedAt.Equal(s.Clock.CurrentTime) ||
+		if !exists || server.Status != model.ServerActive || !validFactTime(*s, event.AcceptedAt) ||
 			!event.ReleasesAt.After(event.AcceptedAt) {
 			return fmt.Errorf("%w: server %q cannot accept request", ErrInvalidEvent, event.ServerID)
 		}
@@ -610,7 +656,7 @@ func (s *State) Apply(event events.Event) error {
 		if !exists {
 			return fmt.Errorf("%w: request %q does not exist", ErrInvalidEvent, event.RequestID)
 		}
-		if request.Status != model.PageRequestInProgress || !event.CompletedAt.Equal(s.Clock.CurrentTime) ||
+		if request.Status != model.PageRequestInProgress || !validFactTime(*s, event.CompletedAt) ||
 			(request.LoadUnits > 0 && event.ServerID != request.ServerID) {
 			return fmt.Errorf("%w: request %q cannot be completed", ErrInvalidEvent, event.RequestID)
 		}
@@ -632,7 +678,7 @@ func (s *State) Apply(event events.Event) error {
 		}
 		request, exists := s.Requests[event.RequestID]
 		if !exists || request.Status != model.PageRequestInProgress || event.StatusCode < 400 ||
-			event.ErrorCode == "" || !event.RejectedAt.Equal(s.Clock.CurrentTime) {
+			event.ErrorCode == "" || !validFactTime(*s, event.RejectedAt) {
 			return fmt.Errorf("%w: request %q cannot be rejected", ErrInvalidEvent, event.RequestID)
 		}
 		request.Status = model.PageRequestFailed
@@ -661,6 +707,9 @@ func (s *State) Apply(event events.Event) error {
 			Message:     event.Message,
 			Status:      model.FixSubmitted,
 			SubmittedAt: event.SubmittedAt,
+		}
+		if err := s.recordCommand(event.CommandID, "fix:"+event.Message); err != nil {
+			return err
 		}
 		return nil
 
@@ -698,9 +747,103 @@ func (s *State) Apply(event events.Event) error {
 		s.Fixes[event.CommandID] = fix
 		return nil
 
+	case events.InfrastructureCostAccrued:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		server, exists := s.Servers[event.ServerID]
+		if !exists || event.AmountMinor < 0 || event.BilledHours <= server.BilledHours || !event.To.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid infrastructure cost", ErrInvalidEvent)
+		}
+		server.BilledHours = event.BilledHours
+		s.Servers[event.ServerID] = server
+		s.Economy.ServerCostMinor += event.AmountMinor
+		return nil
+
+	case events.DeploymentCostAccrued:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		deployment, exists := s.Deployments[event.DeploymentID]
+		if !exists || event.AmountMinor != deployment.CostMinor || !event.AccruedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: invalid deployment cost", ErrInvalidEvent)
+		}
+		s.Economy.DeploymentCostMinor += event.AmountMinor
+		return nil
+
+	case events.RevenueLost:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		if event.VisitorID == "" || event.AmountMinor <= 0 || !validFactTime(*s, event.LostAt) {
+			return fmt.Errorf("%w: invalid lost revenue", ErrInvalidEvent)
+		}
+		s.Economy.LostPurchases++
+		s.Economy.LostRevenueMinor += event.AmountMinor
+		return nil
+
+	case events.VisitorArrived:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		if event.VisitorID == "" || !validFactTime(*s, event.ArrivedAt) {
+			return fmt.Errorf("%w: invalid visitor arrival", ErrInvalidEvent)
+		}
+		if _, exists := s.Visitors[event.VisitorID]; exists {
+			return fmt.Errorf("%w: visitor already exists", ErrInvalidEvent)
+		}
+		s.Visitors[event.VisitorID] = VisitorState{ID: event.VisitorID, ArrivedAt: event.ArrivedAt}
+		if s.ScheduleCursor < len(s.Schedule) {
+			next := s.Schedule[s.ScheduleCursor]
+			if next.OccursAt.Equal(event.ArrivedAt) && reflect.DeepEqual(next.Event, event) {
+				s.ScheduleCursor++
+			}
+		}
+		return nil
+
+	case events.ProductSelected:
+		visitor, exists := s.Visitors[event.VisitorID]
+		if !exists || s.Products[event.ProductID].ID == "" || !validFactTime(*s, event.SelectedAt) {
+			return fmt.Errorf("%w: invalid product selection", ErrInvalidEvent)
+		}
+		visitor.ProductID = event.ProductID
+		s.Visitors[event.VisitorID] = visitor
+		return nil
+
+	case events.PurchaseIntentCreated:
+		visitor, exists := s.Visitors[event.VisitorID]
+		if !exists || visitor.ProductID != event.ProductID || event.PurchaseID == "" || !validFactTime(*s, event.CreatedAt) {
+			return fmt.Errorf("%w: invalid purchase intent", ErrInvalidEvent)
+		}
+		return nil
+
+	case events.VisitorJourneyCompleted:
+		visitor, exists := s.Visitors[event.VisitorID]
+		if !exists || event.Outcome == "" || !validFactTime(*s, event.CompletedAt) {
+			return fmt.Errorf("%w: invalid visitor completion", ErrInvalidEvent)
+		}
+		visitor.Outcome, visitor.CompletedAt = event.Outcome, event.CompletedAt
+		s.Visitors[event.VisitorID] = visitor
+		return nil
+
 	default:
 		return fmt.Errorf("%w: unsupported event %T", ErrInvalidEvent, event)
 	}
+}
+
+func validFactTime(state State, at time.Time) bool {
+	return !at.Before(state.Clock.StartedAt) && !at.After(state.Clock.CurrentTime)
+}
+
+func (s *State) recordCommand(commandID model.CommandID, payload string) error {
+	if s.CommandPayloads == nil {
+		s.CommandPayloads = make(map[model.CommandID]string)
+	}
+	if previous, exists := s.CommandPayloads[commandID]; exists && previous != payload {
+		return ErrIdempotencyConflict
+	}
+	s.CommandPayloads[commandID] = payload
+	return nil
 }
 
 func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time) int64 {

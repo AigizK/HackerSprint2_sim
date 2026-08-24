@@ -36,6 +36,7 @@ type PurchaseProduct struct {
 func (PurchaseProduct) commandType() string { return "PurchaseProduct" }
 
 type AdvanceTime struct {
+	CommandID         model.CommandID
 	RealElapsed       time.Duration
 	RequestedDuration time.Duration
 }
@@ -85,3 +86,32 @@ type StartDeployment struct {
 }
 
 func (StartDeployment) commandType() string { return "StartDeployment" }
+
+type SetBackendDesiredInstances struct {
+	CommandID        model.CommandID
+	OperationID      model.OperationID
+	DesiredInstances int
+}
+
+func (SetBackendDesiredInstances) commandType() string { return "SetBackendDesiredInstances" }
+
+type ProbePage struct {
+	RequestID model.RequestID
+	Page      model.PageType
+	ProductID model.ProductID
+}
+
+func (ProbePage) commandType() string { return "ProbePage" }
+
+type SimulateVisitor struct {
+	VisitorID model.VisitorID
+}
+
+func (SimulateVisitor) commandType() string { return "SimulateVisitor" }
+
+type SynchronizeRealTime struct {
+	CommandID   model.CommandID
+	RealElapsed time.Duration
+}
+
+func (SynchronizeRealTime) commandType() string { return "SynchronizeRealTime" }
