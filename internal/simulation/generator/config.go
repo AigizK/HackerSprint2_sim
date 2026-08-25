@@ -39,18 +39,21 @@ type WorldGenerationProfile struct {
 }
 
 type ClockConfig struct {
-	StartsAt string `yaml:"starts_at"`
-	EndsAt   string `yaml:"ends_at"`
-	Timezone string `yaml:"timezone"`
+	StartsAt                 string `yaml:"starts_at"`
+	EndsAt                   string `yaml:"ends_at"`
+	Timezone                 string `yaml:"timezone"`
+	RandomStartMonth         bool   `yaml:"random_start_month"`
+	SimulationDurationMonths int    `yaml:"simulation_duration_months"`
 }
 
 type TrafficConfig struct {
-	BaseArrivalsPerHour int64              `yaml:"base_arrivals_per_hour"`
-	HourlyMultipliers   []uint32           `yaml:"hourly_multipliers_ppm"`
-	WeekdayMultipliers  map[string]uint32  `yaml:"weekday_multipliers_ppm"`
-	SpecialDays         []SpecialDayConfig `yaml:"special_days"`
-	NoiseMultiplier     PPMRange           `yaml:"noise_multiplier"`
-	MaxArrivalsPerHour  int64              `yaml:"max_arrivals_per_hour"`
+	BaseArrivalsPerHour   int64              `yaml:"base_arrivals_per_hour"`
+	TargetScheduledEvents int64              `yaml:"target_scheduled_events"`
+	HourlyMultipliers     []uint32           `yaml:"hourly_multipliers_ppm"`
+	WeekdayMultipliers    map[string]uint32  `yaml:"weekday_multipliers_ppm"`
+	SpecialDays           []SpecialDayConfig `yaml:"special_days"`
+	NoiseMultiplier       PPMRange           `yaml:"noise_multiplier"`
+	MaxArrivalsPerHour    int64              `yaml:"max_arrivals_per_hour"`
 }
 
 type SpecialDayConfig struct {
@@ -180,13 +183,20 @@ func (p WorldGenerationProfile) Validate() error {
 	if err != nil {
 		return invalid("clock.ends_at must be RFC3339")
 	}
-	if end.Sub(start) < 365*24*time.Hour {
-		return invalid("world must last at least 365 days")
+	if !end.After(start) || p.Clock.SimulationDurationMonths <= 0 {
+		return invalid("clock selection window and simulation duration must be positive")
+	}
+	if p.Clock.RandomStartMonth && end.Sub(start) < 365*24*time.Hour {
+		return invalid("random month selection requires at least a one-year selection window")
+	}
+	if start.AddDate(0, p.Clock.SimulationDurationMonths, 0).After(end) {
+		return invalid("simulation duration does not fit clock selection window")
 	}
 	if _, err := time.LoadLocation(p.Clock.Timezone); err != nil {
 		return invalid("clock.timezone is invalid")
 	}
-	if p.Traffic.BaseArrivalsPerHour <= 0 || len(p.Traffic.HourlyMultipliers) != 24 {
+	if p.Traffic.BaseArrivalsPerHour <= 0 || p.Traffic.TargetScheduledEvents <= 0 ||
+		p.Traffic.TargetScheduledEvents > p.Limits.MaxScheduledEvents || len(p.Traffic.HourlyMultipliers) != 24 {
 		return invalid("traffic needs a positive base rate and exactly 24 hourly multipliers")
 	}
 	for _, multiplier := range p.Traffic.HourlyMultipliers {
@@ -232,6 +242,9 @@ func (p WorldGenerationProfile) Validate() error {
 		if !exists || !validPositiveRange(config.LoadUnits) || !validPositiveRange(config.ResourceHoldSeconds) {
 			return invalid("invalid or missing page configuration for %q", page)
 		}
+		if config.LoadUnits.Max > p.Infrastructure.ServerCapacityUnits {
+			return invalid("page %q load cannot fit on one server", page)
+		}
 	}
 	if !validNonNegativeRange(p.Bugs.InitialBugCount) || !validPPM(p.Bugs.ProductHasBugProbabilityPPM) ||
 		!validPPMRange(p.Bugs.TriggerProbability) || !validWeights(p.Bugs.PageWeights) || p.Bugs.FixTokenLength < 8 {
@@ -250,6 +263,9 @@ func (p WorldGenerationProfile) Validate() error {
 	if p.DDoS.Enabled {
 		if !validNonNegativeRange(p.DDoS.AttackCount) || !validWeights(p.DDoS.TargetPageWeights) || len(p.DDoS.Kinds) == 0 {
 			return invalid("invalid DDoS configuration")
+		}
+		if p.Traffic.TargetScheduledEvents <= 2*p.DDoS.AttackCount.Max {
+			return invalid("target scheduled events must leave room for visitors after DDoS events")
 		}
 		for _, kind := range p.DDoS.Kinds {
 			if kind.ID == "" || kind.Weight == 0 ||

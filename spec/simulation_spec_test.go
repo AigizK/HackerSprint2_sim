@@ -174,13 +174,16 @@ func TestTimeAdvanceStopsAtEndOfWorld(t *testing.T) {
 	)
 
 	s.Then(
-		s.Events.Exactly(events.TimeAdvanced{
-			From:              worldStartsAt,
-			To:                endsAt,
-			RealElapsed:       5 * time.Minute,
-			RequestedDuration: 24 * time.Hour,
-			AppliedDuration:   30 * time.Minute,
-		}),
+		s.Events.Exactly(
+			events.TimeAdvanced{
+				From:              worldStartsAt,
+				To:                endsAt,
+				RealElapsed:       5 * time.Minute,
+				RequestedDuration: 24 * time.Hour,
+				AppliedDuration:   30 * time.Minute,
+			},
+			events.RunEnded{CompletedAt: endsAt, Reason: "world_completed"},
+		),
 		s.State.CurrentTime(endsAt),
 		s.State.IsCompleted(),
 	)

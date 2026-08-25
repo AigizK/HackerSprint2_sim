@@ -183,6 +183,19 @@ func (d WorldDSL) InfrastructureConfigured(serverProvisioningDuration time.Durat
 	}
 }
 
+func (d WorldDSL) EconomyConfigured(initialBalanceMinor int64, billingPeriod time.Duration) Step {
+	return func(s *Scenario) error {
+		state, err := s.state()
+		if err != nil {
+			return err
+		}
+		return s.appendGiven(events.EconomyConfigured{
+			InitialBalanceMinor: initialBalanceMinor, StopRunOnNegativeBalance: true,
+			ServerBillingPeriod: billingPeriod, ConfiguredAt: state.Clock.CurrentTime,
+		})
+	}
+}
+
 func (d WorldDSL) Schedule(schedule events.EventSchedule) Step {
 	return func(s *Scenario) error {
 		state, err := s.state()

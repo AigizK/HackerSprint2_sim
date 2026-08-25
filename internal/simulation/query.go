@@ -168,7 +168,12 @@ func buildMetrics(records []StoredEvent, state State, query MetricsQuery) Metric
 		}
 	}
 	points := make([]MetricPointView, 0)
+	requestPages := make(map[model.RequestID]model.PageType)
 	for _, record := range records {
+		if started, ok := record.Event.(events.PageRequestStarted); ok {
+			requestPages[started.RequestID] = started.Page
+			continue
+		}
 		event, ok := record.Event.(events.PageRequestCompleted)
 		if !ok {
 			if rejected, yes := record.Event.(events.PageRequestRejected); yes {
@@ -179,8 +184,8 @@ func buildMetrics(records []StoredEvent, state State, query MetricsQuery) Metric
 		if !ok {
 			continue
 		}
-		request := state.Requests[event.RequestID]
-		p := pageMetric(byPage, request.Page)
+		page := requestPages[event.RequestID]
+		p := pageMetric(byPage, page)
 		if event.StatusCode >= 500 {
 			current.Responses500++
 			p.Responses500++
@@ -191,12 +196,12 @@ func buildMetrics(records []StoredEvent, state State, query MetricsQuery) Metric
 		if event.Latency > 0 {
 			latencies = append(latencies, event.Latency)
 		}
-		if !query.From.IsZero() && event.CompletedAt.Before(query.From) || !query.To.IsZero() && event.CompletedAt.After(query.To) || query.Page != "" && request.Page != query.Page {
+		if !query.From.IsZero() && event.CompletedAt.Before(query.From) || !query.To.IsZero() && event.CompletedAt.After(query.To) || query.Page != "" && page != query.Page {
 			continue
 		}
 		for _, name := range query.Names {
 			if name == "responses_200" && event.StatusCode >= 200 && event.StatusCode < 300 || name == "responses_500" && event.StatusCode >= 500 {
-				points = append(points, MetricPointView{Timestamp: bucket(event.CompletedAt, query.From, query.Step), Name: name, Page: request.Page, Value: 1})
+				points = append(points, MetricPointView{Timestamp: bucket(event.CompletedAt, query.From, query.Step), Name: name, Page: page, Value: 1})
 			}
 		}
 	}
@@ -260,21 +265,40 @@ func coalescePoints(in []MetricPointView) []MetricPointView {
 }
 
 func (q *QueryService) Logs(runID string, query LogsQuery) (LogsView, error) {
-	records, state, err := q.records(runID)
+	records, _, err := q.records(runID)
 	if err != nil {
 		return LogsView{}, err
 	}
-	all := make([]RequestLogView, 0)
+	requestStates := make(map[model.RequestID]PageRequestState)
+	requestOrder := make([]model.RequestID, 0)
 	hasProbe := false
 	for _, record := range records {
-		started, ok := record.Event.(events.PageRequestStarted)
-		if !ok {
-			continue
+		switch event := record.Event.(type) {
+		case events.PageRequestStarted:
+			requestStates[event.RequestID] = PageRequestState{ID: event.RequestID, Source: event.Source, VisitorID: event.VisitorID, Page: event.Page, ProductID: event.ProductID, LoadUnits: event.LoadUnits, StartedAt: event.StartedAt}
+			requestOrder = append(requestOrder, event.RequestID)
+			if event.Source == model.RequestSourceProbe {
+				hasProbe = true
+			}
+		case events.PageRequestAccepted:
+			request := requestStates[event.RequestID]
+			request.ServerID, request.ReleasesAt = event.ServerID, event.ReleasesAt
+			requestStates[event.RequestID] = request
+		case events.PageRequestCompleted:
+			request := requestStates[event.RequestID]
+			request.StatusCode, request.ErrorCode, request.Message = event.StatusCode, event.ErrorCode, event.Message
+			request.CompletedAt = event.CompletedAt
+			requestStates[event.RequestID] = request
+		case events.PageRequestRejected:
+			request := requestStates[event.RequestID]
+			request.StatusCode, request.ErrorCode, request.Message = event.StatusCode, event.ErrorCode, event.Message
+			request.CompletedAt = event.RejectedAt
+			requestStates[event.RequestID] = request
 		}
-		request := state.Requests[started.RequestID]
-		if started.Source == model.RequestSourceProbe {
-			hasProbe = true
-		}
+	}
+	all := make([]RequestLogView, 0, len(requestOrder))
+	for _, requestID := range requestOrder {
+		request := requestStates[requestID]
 		all = append(all, RequestLogView{Entry: logs.Entry{Timestamp: request.CompletedAt, RequestID: request.ID, Source: request.Source, VisitorID: request.VisitorID, Page: request.Page, ProductID: request.ProductID, StatusCode: request.StatusCode, ErrorCode: request.ErrorCode, Message: request.Message}, Latency: request.CompletedAt.Sub(request.StartedAt), LoadUnits: request.LoadUnits, ServerID: request.ServerID})
 	}
 	for i := range all {

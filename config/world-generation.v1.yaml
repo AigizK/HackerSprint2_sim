@@ -1,16 +1,23 @@
 version: world-generation.v1
 
 clock:
+  # A deterministic month is selected from this full-year window for every seed.
   starts_at: "2030-01-01T00:00:00Z"
   ends_at: "2031-01-01T00:00:00Z"
   timezone: Europe/Moscow
+  random_start_month: true
+  simulation_duration_months: 1
 
 traffic:
-  base_arrivals_per_hour: 120
+  # Total VisitorArrived + incident events generated for the selected month.
+  target_scheduled_events: 100000
+  # This is a relative weight. The generator normalizes hourly, weekday,
+  # holiday and noise weights to target_scheduled_events for the selected month.
+  base_arrivals_per_hour: 1
   # Index is the local hour: 0 through 23.
   hourly_multipliers_ppm:
-    [200000, 150000, 100000, 80000, 80000, 120000, 250000, 500000, 800000, 1000000, 1150000, 1200000,
-     1150000, 1100000, 1050000, 1100000, 1250000, 1450000, 1600000, 1550000, 1350000, 1000000, 650000, 350000]
+    [16000, 12000, 8000, 6400, 6400, 9600, 20000, 40000, 64000, 80000, 92000, 96000,
+     92000, 88000, 84000, 88000, 100000, 116000, 128000, 124000, 108000, 80000, 52000, 28000]
   weekday_multipliers_ppm:
     monday: 1000000
     tuesday: 1000000
@@ -45,7 +52,7 @@ traffic:
   noise_multiplier:
     min_ppm: 850000
     max_ppm: 1200000
-  max_arrivals_per_hour: 5000
+  max_arrivals_per_hour: 1000000
 
 journey:
   catalog_to_product_probability_ppm: 850000
@@ -84,7 +91,8 @@ infrastructure:
   min_backend_instances: 0
   max_backend_instances: 50
   server_capacity_units: 100
-  server_cost_per_hour_minor: 1000
+  # 30 currency units/hour for a production backend instance.
+  server_cost_per_hour_minor: 3000
   server_provisioning_seconds: 300
   server_graceful_drain_seconds: 600
   pages:
@@ -166,5 +174,5 @@ economy:
   server_billing_rounding: ceil
 
 limits:
-  max_scheduled_events: 2100000
-  max_visitors: 2000000
+  max_scheduled_events: 10000000
+  max_visitors: 10000000

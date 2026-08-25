@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 	"github.com/aigizk/hackersprint2-sim/spec"
@@ -86,6 +87,26 @@ func TestScheduledEventsAtSameTimeUseStableSequence(t *testing.T) {
 		events.VisitorArrived{VisitorID: "visitor-1", ArrivedAt: at},
 		events.VisitorArrived{VisitorID: "visitor-2", ArrivedAt: at},
 	))
+}
+
+func TestWorldScheduleCanBeAppendedInContiguousChunks(t *testing.T) {
+	startsAt := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	state := simulation.NewState()
+	if err := state.Apply(events.WorldCreated{RunID: "chunked", Seed: 1, StartedAt: startsAt, EndsAt: startsAt.AddDate(0, 1, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	chunks := []events.EventSchedule{
+		{{Sequence: 1, OccursAt: startsAt.Add(time.Hour), Event: events.VisitorArrived{VisitorID: "v1", ArrivedAt: startsAt.Add(time.Hour)}}},
+		{{Sequence: 2, OccursAt: startsAt.Add(2 * time.Hour), Event: events.VisitorArrived{VisitorID: "v2", ArrivedAt: startsAt.Add(2 * time.Hour)}}},
+	}
+	for _, chunk := range chunks {
+		if err := state.Apply(events.WorldScheduleCreated{Schedule: chunk, CreatedAt: startsAt}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(state.Schedule) != 2 {
+		t.Fatalf("schedule events = %d", len(state.Schedule))
+	}
 }
 
 func TestEveryApplicationRequestCanSynchronizeRealElapsedTime(t *testing.T) {

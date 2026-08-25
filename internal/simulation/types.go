@@ -214,6 +214,8 @@ type State struct {
 	Pages                     map[model.PageType]PageConfigState
 	Servers                   map[model.ServerID]ServerState
 	Capacity                  map[model.RequestID]CapacityAllocationState
+	UsedCapacityByServer      map[model.ServerID]int64
+	CapacityIndexedAt         time.Time
 	Operations                map[model.OperationID]OperationState
 	Commands                  map[model.CommandID]model.OperationID
 	CommandPayloads           map[model.CommandID]string
@@ -224,7 +226,9 @@ type State struct {
 	DeploymentNewBugEffects   map[model.DeploymentID][]DeploymentNewBugEffectState
 	ActiveDeployment          model.DeploymentID
 	Requests                  map[model.RequestID]PageRequestState
+	SeenRequests              map[model.RequestID]struct{}
 	Visitors                  map[model.VisitorID]VisitorState
+	SeenVisitors              map[model.VisitorID]struct{}
 	ActiveAttacks             map[model.AttackID]AttackState
 	Schedule                  events.EventSchedule
 	ScheduleCursor            int
@@ -242,6 +246,7 @@ func NewState() State {
 		Pages:                     make(map[model.PageType]PageConfigState),
 		Servers:                   make(map[model.ServerID]ServerState),
 		Capacity:                  make(map[model.RequestID]CapacityAllocationState),
+		UsedCapacityByServer:      make(map[model.ServerID]int64),
 		Operations:                make(map[model.OperationID]OperationState),
 		Commands:                  make(map[model.CommandID]model.OperationID),
 		CommandPayloads:           make(map[model.CommandID]string),
@@ -251,7 +256,9 @@ func NewState() State {
 		DeploymentDurationEffects: make(map[model.DeploymentID][]DeploymentFutureDurationEffectState),
 		DeploymentNewBugEffects:   make(map[model.DeploymentID][]DeploymentNewBugEffectState),
 		Requests:                  make(map[model.RequestID]PageRequestState),
+		SeenRequests:              make(map[model.RequestID]struct{}),
 		Visitors:                  make(map[model.VisitorID]VisitorState),
+		SeenVisitors:              make(map[model.VisitorID]struct{}),
 		ActiveAttacks:             make(map[model.AttackID]AttackState),
 	}
 }

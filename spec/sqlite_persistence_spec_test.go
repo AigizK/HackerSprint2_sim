@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
+	"github.com/aigizk/hackersprint2-sim/internal/persistence/journal"
 	"github.com/aigizk/hackersprint2-sim/internal/persistence/sqlite"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
@@ -15,16 +15,19 @@ import (
 )
 
 type sqlitePersistenceScenario struct {
-	t      *testing.T
-	ctx    context.Context
-	path   string
-	store  *sqlite.Store
-	world  generator.WorldDefinition
-	loaded generator.WorldDefinition
+	t           *testing.T
+	ctx         context.Context
+	path        string
+	store       *sqlite.Store
+	events      *journal.Store
+	journalPath string
+	world       generator.WorldDefinition
+	loaded      generator.WorldDefinition
 }
 
 func newSQLitePersistenceScenario(t *testing.T) *sqlitePersistenceScenario {
-	return &sqlitePersistenceScenario{t: t, ctx: context.Background(), path: filepath.Join(t.TempDir(), "simulation.db")}
+	root := t.TempDir()
+	return &sqlitePersistenceScenario{t: t, ctx: context.Background(), path: filepath.Join(root, "catalog.db"), journalPath: filepath.Join(root, "streams")}
 }
 
 func (s *sqlitePersistenceScenario) GivenOpenDatabase() {
@@ -34,6 +37,10 @@ func (s *sqlitePersistenceScenario) GivenOpenDatabase() {
 		s.t.Fatal(err)
 	}
 	s.store = store
+	s.events, err = journal.Open(s.journalPath)
+	if err != nil {
+		s.t.Fatal(err)
+	}
 	s.t.Cleanup(func() {
 		if s.store != nil {
 			_ = s.store.Close()
@@ -72,12 +79,12 @@ func (s *sqlitePersistenceScenario) WhenWorldIsLoaded() {
 
 func (s *sqlitePersistenceScenario) ThenSameWorldIsReturned() {
 	s.t.Helper()
-	if !reflect.DeepEqual(s.loaded, s.world) {
-		s.t.Fatalf("loaded world = %#v, want %#v", s.loaded, s.world)
+	if s.loaded.WorldID != s.world.WorldID || s.loaded.ScheduleHash != s.world.ScheduleHash || len(s.loaded.Events) != 0 || len(s.loaded.Bootstrap) != 0 {
+		s.t.Fatalf("catalog world = %#v", s.loaded)
 	}
 }
 
-func TestGeneratedWorldEventsSurviveSQLiteRestart(t *testing.T) {
+func TestSQLiteCatalogStoresWorldMetadataButNotGeneratedEvents(t *testing.T) {
 	s := newSQLitePersistenceScenario(t)
 	s.GivenOpenDatabase()
 	s.GivenGeneratedWorld()
@@ -104,7 +111,7 @@ func TestRunContinuesFromSQLiteEventStreamAfterRestart(t *testing.T) {
 	s.WhenWorldIsSaved()
 	createPersistentRun(t, s.store, "run-persistent", s.world)
 
-	handler := simulation.NewHandler(s.store)
+	handler := simulation.NewHandler(s.events)
 	if _, err := handler.Execute(s.ctx, "run-persistent", simulation.CreateWorld{
 		Seed: s.world.Key.Seed, StartedAt: s.world.StartsAt, EndsAt: s.world.EndsAt,
 	}); err != nil {
@@ -118,7 +125,7 @@ func TestRunContinuesFromSQLiteEventStreamAfterRestart(t *testing.T) {
 	}
 
 	s.WhenDatabaseIsRestarted()
-	restartedHandler := simulation.NewHandler(s.store)
+	restartedHandler := simulation.NewHandler(s.events)
 	if _, err := restartedHandler.Execute(s.ctx, "run-persistent", simulation.AdvanceTime{RequestedDuration: 5 * time.Minute}); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +148,7 @@ func TestRunsOfSameStoredWorldHaveIndependentStreams(t *testing.T) {
 	s.WhenWorldIsSaved()
 	createPersistentRun(t, s.store, "run-one", s.world)
 	createPersistentRun(t, s.store, "run-two", s.world)
-	handler := simulation.NewHandler(s.store)
+	handler := simulation.NewHandler(s.events)
 	for _, runID := range []string{"run-one", "run-two"} {
 		if _, err := handler.Execute(s.ctx, runID, simulation.CreateWorld{Seed: s.world.Key.Seed, StartedAt: s.world.StartsAt, EndsAt: s.world.EndsAt}); err != nil {
 			t.Fatal(err)
@@ -168,14 +175,14 @@ func TestEmptyRunCacheCanBeRebuiltFromSQLite(t *testing.T) {
 	s.GivenGeneratedWorld()
 	s.WhenWorldIsSaved()
 	createPersistentRun(t, s.store, "run-cached", s.world)
-	firstCache := simulation.NewCachedEventStore(s.store, 10)
+	firstCache := simulation.NewCachedEventStore(s.events, 10)
 	firstHandler := simulation.NewHandler(firstCache)
 	if _, err := firstHandler.Execute(s.ctx, "run-cached", simulation.CreateWorld{Seed: s.world.Key.Seed, StartedAt: s.world.StartsAt, EndsAt: s.world.EndsAt}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Simulates process cache loss without touching the persistent SQLite stream.
-	secondCache := simulation.NewCachedEventStore(s.store, 10)
+	secondCache := simulation.NewCachedEventStore(s.events, 10)
 	state, err := simulation.NewHandler(secondCache).State(s.ctx, "run-cached")
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +200,11 @@ func generatedWorldDefinition() generator.WorldDefinition {
 		Key:            generator.WorldKey{Seed: 42, ProfileHash: "profile-hash-v1", GeneratorVersion: "generator-v1"},
 		ProfileVersion: "world-generation.v1", ScheduleHash: "schedule-hash-v1", Source: "generated",
 		StartsAt: startsAt, EndsAt: startsAt.AddDate(1, 0, 0), CreatedAt: startsAt,
+		Evaluation: generator.WorldEvaluation{
+			EvaluatorVersion: generator.EvaluatorVersion, MaximumBalanceMinor: 42_000,
+			AgentRequestCount: 2, AgentRequestDuration: 10 * time.Second, MinimumRealTime: 20 * time.Second,
+			OptimalPlan: []generator.OracleAction{{Kind: "start", At: startsAt}, {Kind: "advance_time", At: startsAt}},
+		},
 		Events: events.EventSchedule{{Sequence: 1, OccursAt: arrivesAt, Event: events.VisitorArrived{VisitorID: "visitor-1", ArrivedAt: arrivesAt}}},
 	}
 }

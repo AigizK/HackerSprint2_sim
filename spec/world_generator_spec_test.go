@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/persistence/sqlite"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
@@ -28,6 +29,7 @@ func newWorldGeneratorScenario(t *testing.T) *worldGeneratorScenario {
 		t.Fatal(err)
 	}
 	profile.Traffic.BaseArrivalsPerHour = 1
+	profile.Traffic.TargetScheduledEvents = 100
 	for hour := range profile.Traffic.HourlyMultipliers {
 		profile.Traffic.HourlyMultipliers[hour] = 0
 	}
@@ -37,7 +39,7 @@ func newWorldGeneratorScenario(t *testing.T) *worldGeneratorScenario {
 	}
 	profile.Traffic.SpecialDays = nil
 	profile.Traffic.NoiseMultiplier = generator.PPMRange{Min: generator.ProbabilityScale, Max: generator.ProbabilityScale}
-	profile.Traffic.MaxArrivalsPerHour = 2
+	profile.Traffic.MaxArrivalsPerHour = 100
 	profile.Catalog.ProductCount = generator.IntRange{Min: 3, Max: 3}
 	profile.Bugs.InitialBugCount = generator.IntRange{Min: 1, Max: 1}
 	profile.Deployments.Count = generator.IntRange{Min: 3, Max: 3}
@@ -97,6 +99,19 @@ func (s *worldGeneratorScenario) ThenScheduleContainsTrafficAndDDoS() {
 	if counts["VisitorArrived"] == 0 || counts["TrafficAttackStarted"] != 3 || counts["TrafficAttackEnded"] != 3 {
 		s.t.Fatalf("schedule event counts = %#v", counts)
 	}
+	if len(s.world.Events) != 100 {
+		s.t.Fatalf("scheduled events = %d, want 100", len(s.world.Events))
+	}
+}
+
+func (s *worldGeneratorScenario) ThenWorldHasEvaluation() {
+	s.t.Helper()
+	evaluation := s.world.Evaluation
+	if evaluation.EvaluatorVersion != generator.EvaluatorVersion || evaluation.AgentRequestCount == 0 ||
+		evaluation.MinimumRealTime != time.Duration(evaluation.AgentRequestCount)*generator.DefaultAgentRequestDuration ||
+		evaluation.MaximumBalanceMinor == 0 || len(evaluation.OptimalPlan) != evaluation.AgentRequestCount {
+		s.t.Fatalf("generated evaluation = %#v", evaluation)
+	}
 }
 
 func TestWorldGeneratorIsDeterministicForSeedAndProfile(t *testing.T) {
@@ -119,11 +134,27 @@ func TestWorldGeneratorProducesDifferentWorldForDifferentSeed(t *testing.T) {
 	}
 }
 
-func TestGeneratedWorldContainsReplayableBootstrapAndAnnualSchedule(t *testing.T) {
+func TestGeneratedWorldContainsReplayableBootstrapAndMonthlySchedule(t *testing.T) {
 	s := newWorldGeneratorScenario(t)
 	s.WhenWorldIsGenerated(42)
+	if !s.world.EndsAt.Equal(s.world.StartsAt.AddDate(0, 1, 0)) {
+		t.Fatalf("world clock = %s..%s", s.world.StartsAt, s.world.EndsAt)
+	}
 	s.ThenBootstrapCanBeReplayed()
 	s.ThenScheduleContainsTrafficAndDDoS()
+	s.ThenWorldHasEvaluation()
+}
+
+func TestDifferentSeedsCanSelectDifferentMonthsFromConfiguredYear(t *testing.T) {
+	months := make(map[time.Month]bool)
+	for seed := int64(1); seed <= 24; seed++ {
+		s := newWorldGeneratorScenario(t)
+		s.WhenWorldIsGenerated(seed)
+		months[s.world.StartsAt.Month()] = true
+	}
+	if len(months) < 2 {
+		t.Fatalf("selected months = %v", months)
+	}
 }
 
 func TestGeneratedWorldIsReusedBySeedAndGeneratorKey(t *testing.T) {

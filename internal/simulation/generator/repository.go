@@ -29,6 +29,7 @@ type WorldDefinition struct {
 	StartsAt       time.Time
 	EndsAt         time.Time
 	CreatedAt      time.Time
+	Evaluation     WorldEvaluation
 	Bootstrap      []events.Event
 	Events         events.EventSchedule
 }
@@ -54,8 +55,11 @@ func (r *MemoryWorldRepository) FindWorld(_ context.Context, key WorldKey) (Worl
 	if !exists {
 		return WorldDefinition{}, ErrWorldNotFound
 	}
-	world.Events = append(events.EventSchedule(nil), world.Events...)
-	world.Bootstrap = append([]events.Event(nil), world.Bootstrap...)
+	// A repository is only a catalog. Generated events are always hydrated by
+	// the deterministic generator and never trusted as persisted source data.
+	world.Events = nil
+	world.Bootstrap = nil
+	world.Evaluation.OptimalPlan = append([]OracleAction(nil), world.Evaluation.OptimalPlan...)
 	return world, nil
 }
 
@@ -67,6 +71,7 @@ func (r *MemoryWorldRepository) CreateWorld(_ context.Context, world WorldDefini
 	}
 	world.Events = append(events.EventSchedule(nil), world.Events...)
 	world.Bootstrap = append([]events.Event(nil), world.Bootstrap...)
+	world.Evaluation.OptimalPlan = append([]OracleAction(nil), world.Evaluation.OptimalPlan...)
 	r.worlds[world.Key] = world
 	return nil
 }

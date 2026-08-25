@@ -1,2 +1,6 @@
 .DS_Store
 .idea/
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
+/data/runs/

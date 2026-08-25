@@ -40,6 +40,21 @@ func TestServerUsageIsRoundedUpToWholeHours(t *testing.T) {
 	}
 }
 
+func TestRunStopsAsSoonAsBalanceBecomesNegative(t *testing.T) {
+	s := newCapacityScenario(t, "run-negative-balance", 50)
+	s.Given(s.World.EconomyConfigured(1_000, time.Hour))
+
+	s.When(s.Time.Advance(time.Hour+time.Second, 0))
+
+	s.Then(
+		s.Events.Contains(events.RunEnded{
+			CompletedAt: worldStartsAt.Add(time.Hour + time.Second), Reason: "negative_balance",
+		}),
+		s.State.IsCompleted(),
+		s.Future.Economy(spec.EconomyView{ServerCostMinor: 2_000, BalanceMinor: -1_000}),
+	)
+}
+
 func TestSplitTimeAdvancesDoNotDoubleBillServerHour(t *testing.T) {
 	s := newCapacityScenario(t, "run-cost-split-advance", 50)
 	s.When(s.Time.Advance(30*time.Minute, 0))

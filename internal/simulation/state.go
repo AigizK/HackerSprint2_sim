@@ -109,7 +109,7 @@ func (s *State) Apply(event events.Event) error {
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
-		if !event.CreatedAt.Equal(s.Clock.CurrentTime) || len(s.Schedule) != 0 {
+		if !event.CreatedAt.Equal(s.Clock.StartedAt) || !s.Clock.CurrentTime.Equal(s.Clock.StartedAt) {
 			return fmt.Errorf("%w: invalid world schedule", ErrInvalidEvent)
 		}
 		schedule := append(events.EventSchedule(nil), event.Schedule...)
@@ -119,14 +119,20 @@ func (s *State) Apply(event events.Event) error {
 			}
 			return schedule[i].OccursAt.Before(schedule[j].OccursAt)
 		})
-		seen := make(map[uint64]bool)
-		for _, item := range schedule {
-			if item.Sequence == 0 || seen[item.Sequence] || item.Event == nil || item.OccursAt.Before(s.Clock.CurrentTime) || item.OccursAt.After(s.Clock.EndsAt) {
+		expectedSequence := uint64(len(s.Schedule) + 1)
+		for index, item := range schedule {
+			if item.Sequence != expectedSequence+uint64(index) || item.Event == nil || item.OccursAt.Before(s.Clock.StartedAt) || item.OccursAt.After(s.Clock.EndsAt) {
 				return fmt.Errorf("%w: invalid scheduled event", ErrInvalidEvent)
 			}
-			seen[item.Sequence] = true
+			if len(s.Schedule) > 0 && index == 0 && item.OccursAt.Before(s.Schedule[len(s.Schedule)-1].OccursAt) {
+				return fmt.Errorf("%w: schedule chunk is not chronological", ErrInvalidEvent)
+			}
 		}
-		s.Schedule = schedule
+		// Schedule is immutable after bootstrap. Allocate a new backing array so
+		// decision clones can safely share it without copying the whole world.
+		combined := make(events.EventSchedule, 0, len(s.Schedule)+len(schedule))
+		combined = append(combined, s.Schedule...)
+		s.Schedule = append(combined, schedule...)
 		return nil
 
 	case events.TimeAdvanced:
@@ -158,10 +164,20 @@ func (s *State) Apply(event events.Event) error {
 				return err
 			}
 		}
+		// Everything completed before the command started is no longer needed by
+		// aggregate decisions. IDs remain in compact seen-sets for idempotency.
+		s.pruneDerivedState(event.From)
 		s.Clock.CurrentTime = event.To
-		if event.To.Equal(s.Clock.EndsAt) {
-			s.Status = RunCompleted
+		return nil
+
+	case events.RunEnded:
+		if err := ensureRunning(*s); err != nil {
+			return err
 		}
+		if event.Reason == "" || !event.CompletedAt.Equal(s.Clock.CurrentTime) || event.CompletedAt.After(s.Clock.EndsAt) {
+			return fmt.Errorf("%w: invalid run completion", ErrInvalidEvent)
+		}
+		s.Status = RunCompleted
 		return nil
 
 	case events.PageConfigured:
@@ -636,9 +652,14 @@ func (s *State) Apply(event events.Event) error {
 		if s.Requests == nil {
 			s.Requests = make(map[model.RequestID]PageRequestState)
 		}
-		if _, exists := s.Requests[event.RequestID]; exists {
+		s.pruneExpiredCapacity(event.StartedAt)
+		if _, exists := s.SeenRequests[event.RequestID]; exists {
 			return fmt.Errorf("%w: request %q already exists", ErrInvalidEvent, event.RequestID)
 		}
+		if s.SeenRequests == nil {
+			s.SeenRequests = make(map[model.RequestID]struct{})
+		}
+		s.SeenRequests[event.RequestID] = struct{}{}
 		s.Requests[event.RequestID] = PageRequestState{
 			ID:        event.RequestID,
 			Source:    event.Source,
@@ -679,6 +700,10 @@ func (s *State) Apply(event events.Event) error {
 			AcceptedAt: event.AcceptedAt,
 			ReleasesAt: event.ReleasesAt,
 		}
+		if s.UsedCapacityByServer == nil {
+			s.UsedCapacityByServer = make(map[model.ServerID]int64)
+		}
+		s.UsedCapacityByServer[event.ServerID] += request.LoadUnits
 		request.ServerID = event.ServerID
 		request.ReleasesAt = event.ReleasesAt
 		s.Requests[event.RequestID] = request
@@ -694,6 +719,7 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: capacity allocation %q cannot be released", ErrInvalidEvent, event.RequestID)
 		}
 		delete(s.Capacity, event.RequestID)
+		s.UsedCapacityByServer[event.ServerID] -= allocation.LoadUnits
 		request := s.Requests[event.RequestID]
 		request.ReleasesAt = event.ReleasedAt
 		s.Requests[event.RequestID] = request
@@ -863,9 +889,14 @@ func (s *State) Apply(event events.Event) error {
 		if event.VisitorID == "" || !validFactTime(*s, event.ArrivedAt) {
 			return fmt.Errorf("%w: invalid visitor arrival", ErrInvalidEvent)
 		}
-		if _, exists := s.Visitors[event.VisitorID]; exists {
+		s.pruneExpiredCapacity(event.ArrivedAt)
+		if _, exists := s.SeenVisitors[event.VisitorID]; exists {
 			return fmt.Errorf("%w: visitor already exists", ErrInvalidEvent)
 		}
+		if s.SeenVisitors == nil {
+			s.SeenVisitors = make(map[model.VisitorID]struct{})
+		}
+		s.SeenVisitors[event.VisitorID] = struct{}{}
 		s.Visitors[event.VisitorID] = VisitorState{ID: event.VisitorID, ArrivedAt: event.ArrivedAt}
 		s.markScheduled(event, event.ArrivedAt)
 		return nil
@@ -962,6 +993,9 @@ func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time)
 	if !exists || server.Status != model.ServerActive {
 		return 0
 	}
+	if state.CapacityIndexedAt.Equal(at) {
+		return server.CapacityUnits - state.UsedCapacityByServer[serverID]
+	}
 	used := int64(0)
 	for _, allocation := range state.Capacity {
 		if allocation.ServerID == serverID && allocation.ReleasesAt.After(at) {
@@ -972,12 +1006,50 @@ func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time)
 }
 
 func serverHasLoad(state State, serverID model.ServerID, at time.Time) bool {
+	if state.CapacityIndexedAt.Equal(at) {
+		return state.UsedCapacityByServer[serverID] > 0
+	}
 	for _, allocation := range state.Capacity {
 		if allocation.ServerID == serverID && allocation.ReleasesAt.After(at) {
 			return true
 		}
 	}
 	return false
+}
+
+// pruneExpiredCapacity maintains a derived O(1) capacity index. It does not
+// discard domain history: the append-only event journal remains authoritative.
+func (s *State) pruneExpiredCapacity(at time.Time) {
+	if at.Before(s.CapacityIndexedAt) {
+		return
+	}
+	if s.UsedCapacityByServer == nil {
+		s.UsedCapacityByServer = make(map[model.ServerID]int64)
+	}
+	for requestID, allocation := range s.Capacity {
+		if allocation.ReleasesAt.After(at) {
+			continue
+		}
+		delete(s.Capacity, requestID)
+		s.UsedCapacityByServer[allocation.ServerID] -= allocation.LoadUnits
+	}
+	s.CapacityIndexedAt = at
+}
+
+func (s *State) pruneDerivedState(at time.Time) {
+	s.pruneExpiredCapacity(at)
+	for requestID, request := range s.Requests {
+		if request.Status != model.PageRequestInProgress {
+			if _, active := s.Capacity[requestID]; !active {
+				delete(s.Requests, requestID)
+			}
+		}
+	}
+	for visitorID, visitor := range s.Visitors {
+		if !visitor.CompletedAt.IsZero() && !visitor.CompletedAt.After(at) {
+			delete(s.Visitors, visitorID)
+		}
+	}
 }
 
 func ensureRunExists(state State) error {

@@ -23,6 +23,7 @@ func Rehydrate(records []StoredEvent) (State, error) {
 		}
 		state.Version = record.Version
 	}
+	state.pruneDerivedState(state.Clock.CurrentTime)
 	return state, nil
 }
 
@@ -118,67 +119,100 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			applied = remaining
 		}
 		to := state.Clock.CurrentTime.Add(applied)
-		result := []events.Event{events.TimeAdvanced{
+		working := cloneState(state)
+		result := make([]events.Event, 0)
+		appendEvents := func(items ...events.Event) error {
+			for _, event := range items {
+				if err := working.Apply(event); err != nil {
+					return err
+				}
+				result = append(result, event)
+			}
+			return nil
+		}
+		if err := appendEvents(events.TimeAdvanced{
 			CommandID:         command.CommandID,
 			From:              state.Clock.CurrentTime,
 			To:                to,
 			RealElapsed:       command.RealElapsed,
 			RequestedDuration: command.RequestedDuration,
 			AppliedDuration:   applied,
-		}}
-		result = append(result, infrastructureCostEvents(state, state.Clock.CurrentTime, to)...)
-		if deployment, exists := state.Deployments[state.ActiveDeployment]; exists &&
+		}); err != nil {
+			return nil, err
+		}
+		if err := appendEvents(infrastructureCostEvents(working, state.Clock.CurrentTime, to)...); err != nil {
+			return nil, err
+		}
+		// Events inside the interval are evaluated against infrastructure and
+		// deployments that were active before the advance. Lifecycle changes
+		// becoming ready inside the interval are committed at its end.
+		for _, scheduled := range pendingScheduledEvents(state, to) {
+			if err := appendEvents(scheduled.Event); err != nil {
+				return nil, err
+			}
+			if arrival, ok := scheduled.Event.(events.VisitorArrived); ok && len(working.Products) > 0 {
+				journey, err := decideVisitorMutable(&working, arrival.VisitorID, arrival.ArrivedAt, false)
+				if err != nil {
+					return nil, err
+				}
+				result = append(result, journey...)
+			}
+		}
+		if deployment, exists := working.Deployments[working.ActiveDeployment]; exists &&
 			!deployment.ExpectedCompletionAt.After(to) {
-			result = append(result, deploymentCompletionEvents(state, deployment, to)...)
+			if err := appendEvents(deploymentCompletionEvents(working, deployment, to)...); err != nil {
+				return nil, err
+			}
 		}
 		completedOperations := make(map[model.OperationID]bool)
-		for _, server := range sortedProvisioningServers(state) {
+		for _, server := range sortedProvisioningServers(working) {
 			if server.ReadyAt.After(to) {
 				continue
 			}
-			result = append(result, events.ServerActivated{
+			if err := appendEvents(events.ServerActivated{
 				OperationID: server.OperationID,
 				ServerID:    server.ID,
 				ActivatedAt: to,
-			})
+			}); err != nil {
+				return nil, err
+			}
 			completedOperations[server.OperationID] = true
 		}
 		for operationID := range completedOperations {
-			result = append(result, events.OperationSucceeded{OperationID: operationID, CompletedAt: to})
+			if err := appendEvents(events.OperationSucceeded{OperationID: operationID, CompletedAt: to}); err != nil {
+				return nil, err
+			}
 		}
 		removedOperations := make(map[model.OperationID]bool)
-		for _, server := range sortedDrainingServers(state) {
-			if serverHasLoad(state, server.ID, to) {
+		for _, server := range sortedDrainingServers(working) {
+			if serverHasLoad(working, server.ID, to) {
 				continue
 			}
-			result = append(result, events.ServerRemoved{
+			if err := appendEvents(events.ServerRemoved{
 				OperationID: server.OperationID,
 				ServerID:    server.ID,
 				RemovedAt:   to,
-			})
+			}); err != nil {
+				return nil, err
+			}
 			removedOperations[server.OperationID] = true
 		}
 		for operationID := range removedOperations {
 			allRemoved := true
-			for _, server := range state.Servers {
-				if server.OperationID == operationID && server.Status == model.ServerDraining && serverHasLoad(state, server.ID, to) {
+			for _, server := range working.Servers {
+				if server.OperationID == operationID && server.Status == model.ServerDraining && serverHasLoad(working, server.ID, to) {
 					allRemoved = false
 				}
 			}
 			if allRemoved {
-				result = append(result, events.OperationSucceeded{OperationID: operationID, CompletedAt: to})
-			}
-		}
-		for _, scheduled := range pendingScheduledEvents(state, to) {
-			result = append(result, scheduled.Event)
-			if arrival, ok := scheduled.Event.(events.VisitorArrived); ok && len(state.Products) > 0 {
-				journey, err := decideVisitor(state, arrival.VisitorID, arrival.ArrivedAt, true)
-				if err != nil {
+				if err := appendEvents(events.OperationSucceeded{OperationID: operationID, CompletedAt: to}); err != nil {
 					return nil, err
 				}
-				if len(journey) > 0 {
-					result = append(result, journey[1:]...)
-				}
+			}
+		}
+		if to.Equal(state.Clock.EndsAt) {
+			if err := appendEvents(events.RunEnded{CompletedAt: to, Reason: "world_completed"}); err != nil {
+				return nil, err
 			}
 		}
 		return result, nil
@@ -193,7 +227,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		if command.RequestID == "" || command.VisitorID == "" || !validPage(command.Page) {
 			return nil, fmt.Errorf("%w: invalid page request", ErrInvalidCommand)
 		}
-		if _, exists := state.Requests[command.RequestID]; exists {
+		if _, exists := state.SeenRequests[command.RequestID]; exists {
 			return nil, fmt.Errorf("%w: request %q already exists", ErrInvalidCommand, command.RequestID)
 		}
 		if command.Page != model.PageProductList {
@@ -780,14 +814,20 @@ func deterministicRoll(seed int64, parts ...string) uint32 {
 }
 
 func decideVisitor(state State, visitorID model.VisitorID, at time.Time, includeArrival bool) ([]events.Event, error) {
-	if err := ensureRunning(state); err != nil {
+	working := cloneState(state)
+	return decideVisitorMutable(&working, visitorID, at, includeArrival)
+}
+
+func decideVisitorMutable(working *State, visitorID model.VisitorID, at time.Time, includeArrival bool) ([]events.Event, error) {
+	if err := ensureRunning(*working); err != nil {
 		return nil, err
 	}
 	if visitorID == "" {
 		return nil, fmt.Errorf("%w: visitor id is required", ErrInvalidCommand)
 	}
-	working := state
+	currentTime := working.Clock.CurrentTime
 	working.Clock.CurrentTime = at
+	defer func() { working.Clock.CurrentTime = currentTime }()
 	result := make([]events.Event, 0, 16)
 	appendEvents := func(items ...events.Event) error {
 		for _, event := range items {
@@ -803,7 +843,7 @@ func decideVisitor(state State, visitorID model.VisitorID, at time.Time, include
 			return nil, err
 		}
 	}
-	listEvents, err := Decide("", working, OpenPage{
+	listEvents, err := Decide("", *working, OpenPage{
 		RequestID: model.RequestID(string(visitorID) + ":product_list"), VisitorID: visitorID, Page: model.PageProductList,
 	})
 	if err != nil {
@@ -813,7 +853,11 @@ func decideVisitor(state State, visitorID model.VisitorID, at time.Time, include
 		return nil, err
 	}
 	if requestFailed(listEvents) {
-		return appendJourneyFailure(result, working, visitorID, ProductState{}, model.RequestID(string(visitorID)+":product_list"), at), nil
+		failure := appendJourneyFailure(nil, *working, visitorID, ProductState{}, model.RequestID(string(visitorID)+":product_list"), at)
+		if err := appendEvents(failure...); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 
 	products := make([]ProductState, 0, len(working.Products))
@@ -840,7 +884,7 @@ func decideVisitor(state State, visitorID model.VisitorID, at time.Time, include
 		return nil, err
 	}
 	productRequestID := model.RequestID(string(visitorID) + ":product_page")
-	productEvents, err := Decide("", working, OpenPage{RequestID: productRequestID, VisitorID: visitorID, Page: model.PageProduct, ProductID: selected.ID})
+	productEvents, err := Decide("", *working, OpenPage{RequestID: productRequestID, VisitorID: visitorID, Page: model.PageProduct, ProductID: selected.ID})
 	if err != nil {
 		return nil, err
 	}
@@ -848,7 +892,11 @@ func decideVisitor(state State, visitorID model.VisitorID, at time.Time, include
 		return nil, err
 	}
 	if requestFailed(productEvents) {
-		return appendJourneyFailure(result, working, visitorID, selected, productRequestID, at), nil
+		failure := appendJourneyFailure(nil, *working, visitorID, selected, productRequestID, at)
+		if err := appendEvents(failure...); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	if deterministicRoll(working.Seed, string(visitorID), "purchase") >= selected.PurchaseProbabilityPPM {
 		lost := events.RevenueLost{VisitorID: visitorID, ProductID: selected.ID, AmountMinor: selected.PriceMinor, Reason: model.RevenueLostToAbandonment, LostAt: at}
@@ -860,7 +908,7 @@ func decideVisitor(state State, visitorID model.VisitorID, at time.Time, include
 	if err := appendEvents(events.PurchaseIntentCreated{PurchaseID: purchaseID, VisitorID: visitorID, ProductID: selected.ID, CreatedAt: at}); err != nil {
 		return nil, err
 	}
-	purchaseEvents, err := Decide("", working, OpenPage{RequestID: model.RequestID(purchaseID), VisitorID: visitorID, Page: model.PagePurchase, ProductID: selected.ID})
+	purchaseEvents, err := Decide("", *working, OpenPage{RequestID: model.RequestID(purchaseID), VisitorID: visitorID, Page: model.PagePurchase, ProductID: selected.ID})
 	if err != nil {
 		return nil, err
 	}
@@ -868,10 +916,58 @@ func decideVisitor(state State, visitorID model.VisitorID, at time.Time, include
 		return nil, err
 	}
 	if requestFailed(purchaseEvents) {
-		return appendJourneyFailure(result, working, visitorID, selected, model.RequestID(purchaseID), at), nil
+		failure := appendJourneyFailure(nil, *working, visitorID, selected, model.RequestID(purchaseID), at)
+		if err := appendEvents(failure...); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	_ = appendEvents(events.VisitorJourneyCompleted{VisitorID: visitorID, Outcome: model.VisitorPurchased, CompletedAt: at})
 	return result, nil
+}
+
+func cloneState(state State) State {
+	clone := state
+	clone.Products = cloneMap(state.Products)
+	clone.Purchases = cloneMap(state.Purchases)
+	clone.Bugs = cloneMap(state.Bugs)
+	clone.Fixes = cloneMap(state.Fixes)
+	clone.Pages = cloneMap(state.Pages)
+	clone.Servers = cloneMap(state.Servers)
+	clone.Capacity = cloneMap(state.Capacity)
+	clone.UsedCapacityByServer = cloneMap(state.UsedCapacityByServer)
+	clone.Operations = cloneMap(state.Operations)
+	clone.Commands = cloneMap(state.Commands)
+	clone.CommandPayloads = cloneMap(state.CommandPayloads)
+	clone.Deployments = cloneMap(state.Deployments)
+	clone.DeploymentPageLoadEffects = cloneSliceMap(state.DeploymentPageLoadEffects)
+	clone.DeploymentBugEffects = cloneSliceMap(state.DeploymentBugEffects)
+	clone.DeploymentDurationEffects = cloneSliceMap(state.DeploymentDurationEffects)
+	clone.DeploymentNewBugEffects = cloneSliceMap(state.DeploymentNewBugEffects)
+	clone.Requests = cloneMap(state.Requests)
+	clone.SeenRequests = cloneMap(state.SeenRequests)
+	clone.Visitors = cloneMap(state.Visitors)
+	clone.SeenVisitors = cloneMap(state.SeenVisitors)
+	clone.ActiveAttacks = cloneMap(state.ActiveAttacks)
+	// World schedule is immutable after bootstrap and therefore safe to share.
+	clone.Schedule = state.Schedule
+	return clone
+}
+
+func cloneMap[K comparable, V any](source map[K]V) map[K]V {
+	clone := make(map[K]V, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
+
+func cloneSliceMap[K comparable, V any](source map[K][]V) map[K][]V {
+	clone := make(map[K][]V, len(source))
+	for key, value := range source {
+		clone[key] = append([]V(nil), value...)
+	}
+	return clone
 }
 
 func requestFailed(items []events.Event) bool {
@@ -905,17 +1001,14 @@ func appendJourneyFailure(result []events.Event, state State, visitorID model.Vi
 }
 
 func pendingScheduledEvents(state State, to time.Time) events.EventSchedule {
-	result := make(events.EventSchedule, 0)
-	for i := state.ScheduleCursor; i < len(state.Schedule); i++ {
-		scheduled := state.Schedule[i]
-		if scheduled.OccursAt.After(to) {
-			break
-		}
-		if scheduled.OccursAt.After(state.Clock.CurrentTime) {
-			result = append(result, scheduled)
-		}
-	}
-	return result
+	start := state.ScheduleCursor
+	start += sort.Search(len(state.Schedule)-start, func(i int) bool {
+		return state.Schedule[start+i].OccursAt.After(state.Clock.CurrentTime)
+	})
+	endOffset := sort.Search(len(state.Schedule)-start, func(i int) bool {
+		return state.Schedule[start+i].OccursAt.After(to)
+	})
+	return state.Schedule[start : start+endOffset]
 }
 
 func infrastructureCostEvents(state State, from, to time.Time) []events.Event {

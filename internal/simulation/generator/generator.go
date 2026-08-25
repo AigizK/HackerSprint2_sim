@@ -17,13 +17,17 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
-const GeneratorVersion = "world-generator.v1"
+const GeneratorVersion = "world-generator.v4"
 
-var ErrGenerationLimit = errors.New("world generation limit exceeded")
+var (
+	ErrGenerationLimit = errors.New("world generation limit exceeded")
+	ErrWorldIntegrity  = errors.New("regenerated world does not match catalog")
+)
 
 type Generator struct {
 	profile     WorldGenerationProfile
 	profileHash string
+	evaluator   *WorldEvaluator
 }
 
 func New(profile WorldGenerationProfile) (*Generator, error) {
@@ -35,7 +39,17 @@ func New(profile WorldGenerationProfile) (*Generator, error) {
 		return nil, err
 	}
 	hash := sha256.Sum256(payload)
-	return &Generator{profile: profile, profileHash: hex.EncodeToString(hash[:])}, nil
+	evaluator, err := NewWorldEvaluator(EvaluationConfig{
+		InitialBackendInstances: profile.Infrastructure.InitialBackendInstances,
+		ServerCapacityUnits:     profile.Infrastructure.ServerCapacityUnits,
+		ServerCostPerHourMinor:  profile.Infrastructure.ServerCostPerHourMinor,
+		ServerProvisioningTime:  time.Duration(profile.Infrastructure.ServerProvisioningSeconds) * time.Second,
+		AgentRequestDuration:    DefaultAgentRequestDuration,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Generator{profile: profile, profileHash: hex.EncodeToString(hash[:]), evaluator: evaluator}, nil
 }
 
 func (g *Generator) ProfileHash() string { return g.profileHash }
@@ -52,9 +66,11 @@ func (g *Generator) Generate(seed int64) (WorldDefinition, error) {
 	if err != nil {
 		return WorldDefinition{}, err
 	}
-	startsAt, _ := time.Parse(time.RFC3339, g.profile.Clock.StartsAt)
-	endsAt, _ := time.Parse(time.RFC3339, g.profile.Clock.EndsAt)
-	random := deterministicRandom{seed: seed, profileHash: g.profileHash, generatorVersion: GeneratorVersion}
+	random := deterministicRandom{seed: seed, generatorVersion: GeneratorVersion}
+	startsAt, endsAt, err := g.worldClock(random)
+	if err != nil {
+		return WorldDefinition{}, err
+	}
 
 	bootstrap, products, bugs, err := g.generateBootstrap(random, startsAt)
 	if err != nil {
@@ -71,12 +87,35 @@ func (g *Generator) Generate(seed int64) (WorldDefinition, error) {
 		return WorldDefinition{}, err
 	}
 	worldDigest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", seed, g.profileHash, GeneratorVersion)))
-	return WorldDefinition{
+	world := WorldDefinition{
 		WorldID: "w" + hex.EncodeToString(worldDigest[:16]), Key: key,
 		ProfileVersion: g.profile.Version, ScheduleHash: hash, Source: "generated",
 		StartsAt: startsAt, EndsAt: endsAt, CreatedAt: startsAt,
 		Bootstrap: bootstrap, Events: schedule,
-	}, nil
+	}
+	world.Evaluation, err = g.evaluator.Evaluate(world)
+	if err != nil {
+		return WorldDefinition{}, err
+	}
+	return world, nil
+}
+
+func (g *Generator) worldClock(random deterministicRandom) (time.Time, time.Time, error) {
+	windowStart, _ := time.Parse(time.RFC3339, g.profile.Clock.StartsAt)
+	windowEnd, _ := time.Parse(time.RFC3339, g.profile.Clock.EndsAt)
+	durationMonths := g.profile.Clock.SimulationDurationMonths
+	startsAt := windowStart
+	if g.profile.Clock.RandomStartMonth {
+		candidates := make([]time.Time, 0, 12)
+		for candidate := windowStart; !candidate.AddDate(0, durationMonths, 0).After(windowEnd); candidate = candidate.AddDate(0, 1, 0) {
+			candidates = append(candidates, candidate)
+		}
+		if len(candidates) == 0 {
+			return time.Time{}, time.Time{}, fmt.Errorf("%w: no month fits clock selection window", ErrInvalidProfile)
+		}
+		startsAt = candidates[random.uint64("clock:start_month")%uint64(len(candidates))]
+	}
+	return startsAt, startsAt.AddDate(0, durationMonths, 0), nil
 }
 
 func (g *Generator) GetOrCreate(ctx context.Context, repository WorldRepository, seed int64) (WorldDefinition, bool, error) {
@@ -86,7 +125,14 @@ func (g *Generator) GetOrCreate(ctx context.Context, repository WorldRepository,
 	}
 	world, err := repository.FindWorld(ctx, key)
 	if err == nil {
-		return world, false, nil
+		regenerated, generationErr := g.Generate(seed)
+		if generationErr != nil {
+			return WorldDefinition{}, false, generationErr
+		}
+		if err := verifyCatalogWorld(world, regenerated); err != nil {
+			return WorldDefinition{}, false, err
+		}
+		return regenerated, false, nil
 	}
 	if !errors.Is(err, ErrWorldNotFound) {
 		return WorldDefinition{}, false, err
@@ -97,12 +143,28 @@ func (g *Generator) GetOrCreate(ctx context.Context, repository WorldRepository,
 	}
 	if err := repository.CreateWorld(ctx, world); err != nil {
 		if errors.Is(err, ErrWorldAlreadyExists) {
-			world, err = repository.FindWorld(ctx, key)
-			return world, false, err
+			catalogWorld, findErr := repository.FindWorld(ctx, key)
+			if findErr != nil {
+				return WorldDefinition{}, false, findErr
+			}
+			if err := verifyCatalogWorld(catalogWorld, world); err != nil {
+				return WorldDefinition{}, false, err
+			}
+			return world, false, nil
 		}
 		return WorldDefinition{}, false, err
 	}
 	return world, true, nil
+}
+
+func verifyCatalogWorld(catalog, generated WorldDefinition) error {
+	if catalog.WorldID != generated.WorldID || catalog.ScheduleHash != generated.ScheduleHash ||
+		catalog.ProfileVersion != generated.ProfileVersion || catalog.Source != generated.Source ||
+		!catalog.StartsAt.Equal(generated.StartsAt) || !catalog.EndsAt.Equal(generated.EndsAt) {
+		return fmt.Errorf("%w: seed %d, catalog schedule %s, generated schedule %s",
+			ErrWorldIntegrity, generated.Key.Seed, catalog.ScheduleHash, generated.ScheduleHash)
+	}
+	return nil
 }
 
 type generatedProduct struct {
@@ -268,20 +330,70 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 	location, _ := time.LoadLocation(g.profile.Clock.Timezone)
 	schedule := make(events.EventSchedule, 0)
 	visitorCount := int64(0)
+	attackCount := 0
+	if g.profile.DDoS.Enabled {
+		attackCount = int(random.int64Range(g.profile.DDoS.AttackCount, "ddos:count"))
+	}
+	visitorTarget := g.profile.Traffic.TargetScheduledEvents - int64(2*attackCount)
+	if visitorTarget <= 0 || visitorTarget > g.profile.Limits.MaxVisitors {
+		return nil, fmt.Errorf("%w: visitor target %d is outside limits", ErrGenerationLimit, visitorTarget)
+	}
+	type hourAllocation struct {
+		hour      time.Time
+		weight    int64
+		count     int64
+		remainder int64
+	}
+	allocations := make([]hourAllocation, 0, int(endsAt.Sub(startsAt)/time.Hour)+1)
+	var totalWeight int64
 	for hour := startsAt.Truncate(time.Hour); hour.Before(endsAt); hour = hour.Add(time.Hour) {
 		local := hour.In(location)
-		count := g.profile.Traffic.BaseArrivalsPerHour
-		count = multiplyPPM(count, g.profile.Traffic.HourlyMultipliers[local.Hour()])
-		count = multiplyPPM(count, g.profile.Traffic.WeekdayMultipliers[strings.ToLower(local.Weekday().String())])
-		count = multiplyPPM(count, specialDayMultiplier(g.profile.Traffic.SpecialDays, local))
+		expectedPPM := g.profile.Traffic.BaseArrivalsPerHour * int64(ProbabilityScale)
+		expectedPPM = scaleFixedPPM(expectedPPM, g.profile.Traffic.HourlyMultipliers[local.Hour()])
+		expectedPPM = scaleFixedPPM(expectedPPM, g.profile.Traffic.WeekdayMultipliers[strings.ToLower(local.Weekday().String())])
+		expectedPPM = scaleFixedPPM(expectedPPM, specialDayMultiplier(g.profile.Traffic.SpecialDays, local))
 		noise := random.ppmRange(g.profile.Traffic.NoiseMultiplier, "traffic:"+hour.Format(time.RFC3339)+":noise")
-		count = multiplyPPM(count, noise)
+		expectedPPM = scaleFixedPPM(expectedPPM, noise)
+		if expectedPPM <= 0 {
+			continue
+		}
+		allocations = append(allocations, hourAllocation{hour: hour, weight: expectedPPM})
+		totalWeight += expectedPPM
+	}
+	if totalWeight <= 0 {
+		return nil, fmt.Errorf("%w: traffic weights are empty", ErrInvalidProfile)
+	}
+	var allocated int64
+	for index := range allocations {
+		scaled := visitorTarget * allocations[index].weight
+		allocations[index].count = scaled / totalWeight
+		allocations[index].remainder = scaled % totalWeight
+		allocated += allocations[index].count
+	}
+	remaining := visitorTarget - allocated
+	ranked := make([]int, len(allocations))
+	for index := range ranked {
+		ranked[index] = index
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		left, right := allocations[ranked[i]], allocations[ranked[j]]
+		if left.remainder != right.remainder {
+			return left.remainder > right.remainder
+		}
+		return random.uint64("traffic:allocation:"+left.hour.Format(time.RFC3339)) < random.uint64("traffic:allocation:"+right.hour.Format(time.RFC3339))
+	})
+	for index := int64(0); index < remaining; index++ {
+		allocations[ranked[index]].count++
+	}
+	for _, allocation := range allocations {
+		hour, count := allocation.hour, allocation.count
 		if count > g.profile.Traffic.MaxArrivalsPerHour {
-			count = g.profile.Traffic.MaxArrivalsPerHour
+			return nil, fmt.Errorf("%w: hour %s needs %d visitors, max is %d", ErrGenerationLimit, hour.Format(time.RFC3339), count, g.profile.Traffic.MaxArrivalsPerHour)
 		}
 		if visitorCount+count > g.profile.Limits.MaxVisitors {
 			return nil, fmt.Errorf("%w: visitors exceed %d", ErrGenerationLimit, g.profile.Limits.MaxVisitors)
 		}
+		hourVisitors := make(events.EventSchedule, 0, count)
 		for index := int64(0); index < count; index++ {
 			namespace := fmt.Sprintf("traffic:%s:visitor:%d", hour.Format(time.RFC3339), index)
 			offset := time.Duration(random.uint64(namespace+":offset") % uint64(time.Hour))
@@ -290,12 +402,14 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 				continue
 			}
 			visitorID := model.VisitorID("v" + random.token(namespace+":id", 24))
-			schedule = append(schedule, events.ScheduledWorldEvent{OccursAt: arrivedAt, Event: events.VisitorArrived{VisitorID: visitorID, ArrivedAt: arrivedAt}})
+			hourVisitors = append(hourVisitors, events.ScheduledWorldEvent{OccursAt: arrivedAt, Event: events.VisitorArrived{VisitorID: visitorID, ArrivedAt: arrivedAt}})
 			visitorCount++
 		}
+		sort.Slice(hourVisitors, func(i, j int) bool { return scheduledBefore(hourVisitors[i], hourVisitors[j]) })
+		schedule = append(schedule, hourVisitors...)
 	}
+	incidents := make(events.EventSchedule, 0, 2*attackCount)
 	if g.profile.DDoS.Enabled {
-		attackCount := int(random.int64Range(g.profile.DDoS.AttackCount, "ddos:count"))
 		for index := 1; index <= attackCount; index++ {
 			namespace := fmt.Sprintf("ddos:%d", index)
 			kind := g.profile.DDoS.Kinds[random.weightedKind(g.profile.DDoS.Kinds, namespace+":kind")]
@@ -314,7 +428,7 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 				fixHash = hex.EncodeToString(hash[:])
 			}
 			page := model.PageType(random.weighted(g.profile.DDoS.TargetPageWeights, namespace+":page"))
-			schedule = append(schedule,
+			incidents = append(incidents,
 				events.ScheduledWorldEvent{OccursAt: startedAt, Event: events.TrafficAttackStarted{
 					AttackID: attackID, Kind: model.AttackDDoS, TargetPage: page,
 					RequestsPerMinute:   random.int64Range(kind.RequestsPerMinute, namespace+":rpm"),
@@ -326,33 +440,54 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 			)
 		}
 	}
+	sort.SliceStable(incidents, func(i, j int) bool { return scheduledBefore(incidents[i], incidents[j]) })
+	if len(incidents) > 0 {
+		merged := make(events.EventSchedule, 0, len(schedule)+len(incidents))
+		visitorIndex, incidentIndex := 0, 0
+		for visitorIndex < len(schedule) && incidentIndex < len(incidents) {
+			if scheduledBefore(incidents[incidentIndex], schedule[visitorIndex]) {
+				merged = append(merged, incidents[incidentIndex])
+				incidentIndex++
+			} else {
+				merged = append(merged, schedule[visitorIndex])
+				visitorIndex++
+			}
+		}
+		merged = append(merged, schedule[visitorIndex:]...)
+		merged = append(merged, incidents[incidentIndex:]...)
+		schedule = merged
+	}
 	if int64(len(schedule)) > g.profile.Limits.MaxScheduledEvents {
 		return nil, fmt.Errorf("%w: events exceed %d", ErrGenerationLimit, g.profile.Limits.MaxScheduledEvents)
 	}
-	sort.SliceStable(schedule, func(i, j int) bool {
-		if !schedule[i].OccursAt.Equal(schedule[j].OccursAt) {
-			return schedule[i].OccursAt.Before(schedule[j].OccursAt)
-		}
-		leftType, leftPayload, _ := simulation.EncodeEvent(schedule[i].Event)
-		rightType, rightPayload, _ := simulation.EncodeEvent(schedule[j].Event)
-		if leftType != rightType {
-			return leftType < rightType
-		}
-		return string(leftPayload) < string(rightPayload)
-	})
+	if int64(len(schedule)) != g.profile.Traffic.TargetScheduledEvents {
+		return nil, fmt.Errorf("%w: generated %d scheduled events, target is %d", ErrGenerationLimit, len(schedule), g.profile.Traffic.TargetScheduledEvents)
+	}
 	for index := range schedule {
 		schedule[index].Sequence = uint64(index + 1)
 	}
 	return schedule, nil
 }
 
+func scheduledBefore(left, right events.ScheduledWorldEvent) bool {
+	if !left.OccursAt.Equal(right.OccursAt) {
+		return left.OccursAt.Before(right.OccursAt)
+	}
+	leftType, leftPayload, _ := simulation.EncodeEvent(left.Event)
+	rightType, rightPayload, _ := simulation.EncodeEvent(right.Event)
+	if leftType != rightType {
+		return leftType < rightType
+	}
+	return string(leftPayload) < string(rightPayload)
+}
+
 type deterministicRandom struct {
-	seed                          int64
-	profileHash, generatorVersion string
+	seed             int64
+	generatorVersion string
 }
 
 func (r deterministicRandom) uint64(namespace string) uint64 {
-	hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s:%s", r.seed, r.profileHash, r.generatorVersion, namespace)))
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", r.seed, r.generatorVersion, namespace)))
 	return binary.BigEndian.Uint64(hash[:8])
 }
 func (r deterministicRandom) int64Range(value IntRange, namespace string) int64 {
@@ -373,7 +508,7 @@ func (r deterministicRandom) hit(probability uint32, namespace string) bool {
 func (r deterministicRandom) token(namespace string, length int) string {
 	result := ""
 	for index := 0; len(result) < length; index++ {
-		hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s:%s:%d", r.seed, r.profileHash, r.generatorVersion, namespace, index)))
+		hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s:%d", r.seed, r.generatorVersion, namespace, index)))
 		result += hex.EncodeToString(hash[:])
 	}
 	return result[:length]
@@ -425,8 +560,9 @@ func distributeProbability(total uint32, weights []int64, totalWeight int64) []u
 	}
 	return result
 }
-func multiplyPPM(value int64, multiplier uint32) int64 {
-	return value * int64(multiplier) / int64(ProbabilityScale)
+func scaleFixedPPM(value int64, multiplier uint32) int64 {
+	scale := int64(ProbabilityScale)
+	return value/scale*int64(multiplier) + value%scale*int64(multiplier)/scale
 }
 func maxInt64(a, b int64) int64 {
 	if a > b {

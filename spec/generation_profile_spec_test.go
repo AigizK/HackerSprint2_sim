@@ -58,6 +58,15 @@ func (s *profileScenario) ThenProfileIsValid() {
 	if s.profile.Deployments.FutureDeploymentDurationReduction.Max == 0 {
 		s.t.Fatal("future deployment acceleration is not configured")
 	}
+	if !s.profile.Clock.RandomStartMonth || s.profile.Clock.SimulationDurationMonths != 1 {
+		s.t.Fatalf("random monthly clock = %#v", s.profile.Clock)
+	}
+	if s.profile.Limits.MaxScheduledEvents != 10_000_000 || s.profile.Limits.MaxVisitors != 10_000_000 {
+		s.t.Fatalf("generation limits = %#v", s.profile.Limits)
+	}
+	if s.profile.Traffic.TargetScheduledEvents != 100_000 {
+		s.t.Fatalf("target scheduled events = %d", s.profile.Traffic.TargetScheduledEvents)
+	}
 }
 
 func (s *profileScenario) ThenProfileIsRejected() {
@@ -87,7 +96,7 @@ func TestWorldGenerationProfileRejectsUnknownFields(t *testing.T) {
 	s.ThenProfileIsRejected()
 }
 
-func TestWorldGenerationProfileRejectsWorldShorterThanOneYear(t *testing.T) {
+func TestRandomMonthProfileRejectsSelectionWindowShorterThanOneYear(t *testing.T) {
 	s := newProfileScenario(t)
 	s.GivenDefaultProfile()
 	data, err := os.ReadFile(s.path)
