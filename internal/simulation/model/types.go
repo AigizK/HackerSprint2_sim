@@ -30,10 +30,12 @@ const (
 type RequestFailureCode string
 
 const (
-	FailureServerCapacityExceeded RequestFailureCode = "SERVER_CAPACITY_EXCEEDED"
-	FailurePageBug                RequestFailureCode = "PAGE_BUG"
-	FailureDeployment             RequestFailureCode = "DEPLOYMENT_ERROR"
-	FailureExternalProvider       RequestFailureCode = "EXTERNAL_PROVIDER_ERROR"
+	FailureServerCapacityExceeded       RequestFailureCode = "SERVER_CAPACITY_EXCEEDED"
+	FailurePageBug                      RequestFailureCode = "PAGE_BUG"
+	FailureDeployment                   RequestFailureCode = "DEPLOYMENT_ERROR"
+	FailureExternalProvider             RequestFailureCode = "EXTERNAL_PROVIDER_ERROR"
+	FailureDDoSMitigationRequired       RequestFailureCode = "DDOS_MITIGATION_REQUIRED"
+	FailureBruteForceMitigationRequired RequestFailureCode = "BRUTE_FORCE_MITIGATION_REQUIRED"
 )
 
 type PageRequestStatus string

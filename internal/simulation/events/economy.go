@@ -3,6 +3,7 @@ package events
 import "time"
 
 type EconomyConfigured struct {
+	Currency                 string
 	InitialBalanceMinor      int64
 	StopRunOnNegativeBalance bool
 	ServerBillingPeriod      time.Duration

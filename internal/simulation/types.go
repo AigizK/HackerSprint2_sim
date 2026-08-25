@@ -39,6 +39,7 @@ type ProductState struct {
 }
 
 type EconomyState struct {
+	Currency            string
 	InitialBalanceMinor int64
 	StopRunOnNegative   bool
 	ServerBillingPeriod time.Duration
@@ -74,6 +75,7 @@ type FixSubmissionState struct {
 	Message     string
 	Status      model.FixSubmissionStatus
 	BugID       model.BugID
+	AttackID    model.AttackID
 	SubmittedAt time.Time
 	CompletedAt time.Time
 }
@@ -82,6 +84,7 @@ type PageConfigState struct {
 	Page         model.PageType
 	LoadUnits    int64
 	HoldDuration time.Duration
+	BaseLatency  time.Duration
 	ConfiguredAt time.Time
 }
 
@@ -119,6 +122,14 @@ type OperationState struct {
 	CompletedAt time.Time
 	ErrorCode   string
 	Message     string
+	ProgressPPM uint32
+}
+
+type ProviderState struct {
+	ID                    model.ProviderID
+	FailureProbabilityPPM uint32
+	AdditionalLatency     time.Duration
+	DegradedAt            time.Time
 }
 
 type VisitorState struct {
@@ -194,6 +205,7 @@ type PageRequestState struct {
 	StatusCode  int
 	ErrorCode   model.RequestFailureCode
 	Message     string
+	Latency     time.Duration
 	ServerID    model.ServerID
 	ReleasesAt  time.Time
 	StartedAt   time.Time
@@ -204,6 +216,7 @@ type State struct {
 	RunID                     string
 	Seed                      int64
 	Status                    RunStatus
+	EndReason                 string
 	Version                   uint64
 	Clock                     ClockState
 	Infrastructure            InfrastructureConfigState
@@ -230,6 +243,8 @@ type State struct {
 	Visitors                  map[model.VisitorID]VisitorState
 	SeenVisitors              map[model.VisitorID]struct{}
 	ActiveAttacks             map[model.AttackID]AttackState
+	ResolvedAttacks           map[model.AttackID]struct{}
+	DegradedProviders         map[model.ProviderID]ProviderState
 	Schedule                  events.EventSchedule
 	ScheduleCursor            int
 	DesiredInstances          int
@@ -260,5 +275,7 @@ func NewState() State {
 		Visitors:                  make(map[model.VisitorID]VisitorState),
 		SeenVisitors:              make(map[model.VisitorID]struct{}),
 		ActiveAttacks:             make(map[model.AttackID]AttackState),
+		ResolvedAttacks:           make(map[model.AttackID]struct{}),
+		DegradedProviders:         make(map[model.ProviderID]ProviderState),
 	}
 }

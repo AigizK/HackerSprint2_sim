@@ -7,7 +7,6 @@ import (
 )
 
 // Entry is a read-model record projected from page request events.
-// The projection itself is intentionally not implemented yet.
 type Entry struct {
 	Timestamp  time.Time
 	RequestID  model.RequestID

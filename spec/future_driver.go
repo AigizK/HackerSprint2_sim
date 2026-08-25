@@ -19,7 +19,9 @@ func (*projectionDriver) LoadManualWorld(seed int64) (events.EventSchedule, erro
 }
 func (d *projectionDriver) Overview(id string) (OverviewView, error) {
 	v, e := d.query.Overview(id)
-	return OverviewView(v), e
+	return OverviewView{SimulationTime: v.SimulationTime, SimulationEndsAt: v.SimulationEndsAt, Remaining: v.Remaining,
+		RunStatus: v.RunStatus, SiteStatus: v.SiteStatus, CurrentDeploymentID: v.CurrentDeploymentID,
+		ServerCount: v.ServerCount, CapacityUtilization: v.CapacityUtilization, ErrorRate: v.ErrorRate, BalanceMinor: v.BalanceMinor}, e
 }
 func (d *projectionDriver) Metrics(id string, q MetricsQuery) (MetricsView, error) {
 	v, e := d.query.Metrics(id, simulation.MetricsQuery{From: q.From, To: q.To, Step: q.Step, Names: q.Names, Page: q.Page})
@@ -75,7 +77,9 @@ func (d *projectionDriver) Resources(id string) (ResourcesView, error) {
 }
 func (d *projectionDriver) Economy(id string) (EconomyView, error) {
 	v, e := d.query.Economy(id)
-	return EconomyView(v), e
+	return EconomyView{SuccessfulPurchases: v.SuccessfulPurchases, LostPurchases: v.LostPurchases,
+		RevenueMinor: v.RevenueMinor, LostRevenueMinor: v.LostRevenueMinor, ServerCostMinor: v.ServerCostMinor,
+		DeploymentCostMinor: v.DeploymentCostMinor, BalanceMinor: v.BalanceMinor}, e
 }
 func (d *projectionDriver) Operation(id string, operationID model.OperationID) (OperationView, error) {
 	v, e := d.query.Operation(id, operationID)

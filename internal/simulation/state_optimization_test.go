@@ -40,7 +40,7 @@ func TestCapacityIndexAndScheduleCursorAvoidHistoricalScans(t *testing.T) {
 	state.Servers["server-1"] = ServerState{ID: "server-1", Status: model.ServerActive, CapacityUnits: 100}
 	state.CapacityIndexedAt = now
 	state.UsedCapacityByServer["server-1"] = 60
-	if available := serverAvailableCapacity(state, "server-1", now); available != 40 {
+	if available := serverAvailableCapacity(state, "server-1", model.PageProductList, now); available != 40 {
 		t.Fatalf("available capacity = %d", available)
 	}
 

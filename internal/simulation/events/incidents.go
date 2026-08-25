@@ -24,6 +24,14 @@ type TrafficAttackEnded struct {
 
 func (TrafficAttackEnded) EventType() string { return "TrafficAttackEnded" }
 
+type TrafficAttackMitigated struct {
+	AttackID    AttackID
+	CommandID   CommandID
+	MitigatedAt time.Time
+}
+
+func (TrafficAttackMitigated) EventType() string { return "TrafficAttackMitigated" }
+
 type ExternalProviderDegraded struct {
 	ProviderID            ProviderID
 	FailureProbabilityPPM uint32

@@ -246,6 +246,20 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			LoadUnits: pageConfig.LoadUnits,
 			StartedAt: state.Clock.CurrentTime,
 		}}
+		if attack, blocked := blockingAttack(state, command.Page); blocked {
+			message := fmt.Sprintf("%s attack blocks %s", attack.Kind, command.Page)
+			if attack.Resolution == model.AttackFixOrExpiry {
+				message = "чтоб traffic attack прекратилась, надо сделать фикс с текстом " + attack.FixMessage
+			}
+			errorCode := model.FailureDDoSMitigationRequired
+			if attack.Kind == model.AttackBruteForce {
+				errorCode = model.FailureBruteForceMitigationRequired
+			}
+			return append(result, events.PageRequestRejected{
+				RequestID: command.RequestID, StatusCode: 500, ErrorCode: errorCode,
+				Message: message, RejectedAt: state.Clock.CurrentTime,
+			}), nil
+		}
 		if state.ActiveDeployment != "" {
 			message := fmt.Sprintf("deployment in progress: %s", state.ActiveDeployment)
 			return append(result, events.PageRequestRejected{
@@ -258,7 +272,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		}
 		serverID := model.ServerID("")
 		if pageConfig.LoadUnits > 0 {
-			server, available, accepted := selectServer(state, pageConfig.LoadUnits, state.Clock.CurrentTime)
+			server, available, accepted := selectServer(state, command.Page, pageConfig.LoadUnits, state.Clock.CurrentTime)
 			if !accepted {
 				message := fmt.Sprintf("server capacity exceeded: required=%d available=%d", pageConfig.LoadUnits, available)
 				return append(result, events.PageRequestRejected{
@@ -293,16 +307,26 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 					StatusCode:  500,
 					ErrorCode:   model.FailurePageBug,
 					Message:     message,
+					Latency:     pageConfig.BaseLatency,
 					CompletedAt: state.Clock.CurrentTime,
 				},
 			)
 			return result, nil
+		}
+		if provider, failed := failedProvider(state, command); failed {
+			message := fmt.Sprintf("external provider degraded: %s", provider.ID)
+			return append(result, events.PageRequestCompleted{
+				RequestID: command.RequestID, ServerID: serverID, StatusCode: 500,
+				ErrorCode: model.FailureExternalProvider, Message: message,
+				Latency: pageConfig.BaseLatency + provider.AdditionalLatency, CompletedAt: state.Clock.CurrentTime,
+			}), nil
 		}
 
 		result = append(result, events.PageRequestCompleted{
 			RequestID:   command.RequestID,
 			ServerID:    serverID,
 			StatusCode:  200,
+			Latency:     pageConfig.BaseLatency,
 			CompletedAt: state.Clock.CurrentTime,
 		})
 		if command.Page == model.PagePurchase {
@@ -343,6 +367,13 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 					CommandID: command.CommandID,
 					BugID:     bug.ID,
 					FixedAt:   state.Clock.CurrentTime,
+				}), nil
+			}
+		}
+		for _, attack := range sortedActiveAttacks(state) {
+			if attack.Resolution == model.AttackFixOrExpiry && attack.FixMessageHash == encodedHash {
+				return append(result, events.TrafficAttackMitigated{
+					AttackID: attack.ID, CommandID: command.CommandID, MitigatedAt: state.Clock.CurrentTime,
 				}), nil
 			}
 		}
@@ -459,7 +490,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		}
 		deployment, exists := state.Deployments[command.DeploymentID]
 		if !exists {
-			return nil, fmt.Errorf("%w: deployment %q does not exist", ErrInvalidCommand, command.DeploymentID)
+			return nil, fmt.Errorf("%w: deployment %q", ErrDeploymentNotFound, command.DeploymentID)
 		}
 		if deployment.Status == model.DeploymentStatusApplied || deployment.Status == model.DeploymentStatusSucceeded {
 			return nil, ErrDeploymentApplied
@@ -551,7 +582,7 @@ func validPage(page model.PageType) bool {
 func commandReceipt(command Command) (model.CommandID, string) {
 	switch command := command.(type) {
 	case AdvanceTime:
-		return command.CommandID, fmt.Sprintf("time:%d:%d", command.RealElapsed, command.RequestedDuration)
+		return command.CommandID, timeCommandPayload(command.RealElapsed, command.RequestedDuration)
 	case SynchronizeRealTime:
 		return command.CommandID, fmt.Sprintf("time:%d:0", command.RealElapsed)
 	case ApplyFix:
@@ -560,9 +591,18 @@ func commandReceipt(command Command) (model.CommandID, string) {
 		return command.CommandID, fmt.Sprintf("deployment:%s:%s", command.DeploymentID, command.OperationID)
 	case SetBackendDesiredInstances:
 		return command.CommandID, fmt.Sprintf("scale:%s:%d", command.OperationID, command.DesiredInstances)
+	case ProbePage:
+		return model.CommandID(command.RequestID), fmt.Sprintf("probe:%s:%s", command.Page, command.ProductID)
 	default:
 		return "", ""
 	}
+}
+
+func timeCommandPayload(realElapsed, requested time.Duration) string {
+	if requested > 0 {
+		return fmt.Sprintf("advance:%d", requested)
+	}
+	return fmt.Sprintf("time:%d:0", realElapsed)
 }
 
 func triggeredBug(state State, command OpenPage) (BugState, bool) {
@@ -592,7 +632,25 @@ func sortedActiveBugs(state State) []BugState {
 	return bugs
 }
 
-func selectServer(state State, required int64, at time.Time) (ServerState, int64, bool) {
+func failedProvider(state State, command OpenPage) (ProviderState, bool) {
+	if command.Page != model.PagePurchase {
+		return ProviderState{}, false
+	}
+	ids := make([]string, 0, len(state.DegradedProviders))
+	for id := range state.DegradedProviders {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	for _, rawID := range ids {
+		provider := state.DegradedProviders[model.ProviderID(rawID)]
+		if probabilityHit(state.Seed, model.BugID("provider:"+rawID), command.RequestID, provider.FailureProbabilityPPM) {
+			return provider, true
+		}
+	}
+	return ProviderState{}, false
+}
+
+func selectServer(state State, page model.PageType, required int64, at time.Time) (ServerState, int64, bool) {
 	serverIDs := make([]string, 0, len(state.Servers))
 	for id, server := range state.Servers {
 		if server.Status == model.ServerActive {
@@ -603,7 +661,7 @@ func selectServer(state State, required int64, at time.Time) (ServerState, int64
 	maxAvailable := int64(0)
 	for _, rawID := range serverIDs {
 		server := state.Servers[model.ServerID(rawID)]
-		available := serverAvailableCapacity(state, server.ID, at)
+		available := serverAvailableCapacity(state, server.ID, page, at)
 		if available > maxAvailable {
 			maxAvailable = available
 		}
@@ -612,6 +670,28 @@ func selectServer(state State, required int64, at time.Time) (ServerState, int64
 		}
 	}
 	return ServerState{}, maxAvailable, false
+}
+
+func blockingAttack(state State, page model.PageType) (AttackState, bool) {
+	for _, attack := range sortedActiveAttacks(state) {
+		if attack.TargetPage == page && (attack.Resolution == model.AttackFixOrExpiry || attack.Resolution == model.AttackExpiryOnly) {
+			return attack, true
+		}
+	}
+	return AttackState{}, false
+}
+
+func sortedActiveAttacks(state State) []AttackState {
+	ids := make([]string, 0, len(state.ActiveAttacks))
+	for id := range state.ActiveAttacks {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	result := make([]AttackState, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, state.ActiveAttacks[model.AttackID(id)])
+	}
+	return result
 }
 
 func sortedDrainingServers(state State) []ServerState {
@@ -949,6 +1029,8 @@ func cloneState(state State) State {
 	clone.Visitors = cloneMap(state.Visitors)
 	clone.SeenVisitors = cloneMap(state.SeenVisitors)
 	clone.ActiveAttacks = cloneMap(state.ActiveAttacks)
+	clone.ResolvedAttacks = cloneMap(state.ResolvedAttacks)
+	clone.DegradedProviders = cloneMap(state.DegradedProviders)
 	// World schedule is immutable after bootstrap and therefore safe to share.
 	clone.Schedule = state.Schedule
 	return clone
@@ -1047,7 +1129,12 @@ func decideDesiredInstances(state State, command SetBackendDesiredInstances) ([]
 	if err := ensureNewScaleIdentifiers(state, command.CommandID, command.OperationID); err != nil {
 		return nil, err
 	}
-	current := len(state.Servers)
+	current := 0
+	for _, server := range state.Servers {
+		if server.Status == model.ServerProvisioning || server.Status == model.ServerActive || server.Status == model.ServerDraining {
+			current++
+		}
+	}
 	result := []events.Event{
 		events.BackendScaleRequested{CommandID: command.CommandID, OperationID: command.OperationID, DesiredInstances: command.DesiredInstances, RequestedAt: state.Clock.CurrentTime},
 		events.OperationQueued{OperationID: command.OperationID, Kind: model.OperationScaleBackend, QueuedAt: state.Clock.CurrentTime},
@@ -1077,6 +1164,7 @@ func decideDesiredInstances(state State, command SetBackendDesiredInstances) ([]
 		return result, nil
 	}
 	removeCount := current - command.DesiredInstances
+	allImmediate := true
 	for i := len(serverIDs) - 1; i >= 0 && removeCount > 0; i-- {
 		server := state.Servers[model.ServerID(serverIDs[i])]
 		if server.Status != model.ServerActive {
@@ -1085,21 +1173,13 @@ func decideDesiredInstances(state State, command SetBackendDesiredInstances) ([]
 		result = append(result, events.ServerDrainingStarted{OperationID: command.OperationID, ServerID: server.ID, StartedAt: state.Clock.CurrentTime})
 		if !serverHasLoad(state, server.ID, state.Clock.CurrentTime) {
 			result = append(result, events.ServerRemoved{OperationID: command.OperationID, ServerID: server.ID, RemovedAt: state.Clock.CurrentTime})
+		} else {
+			allImmediate = false
 		}
 		removeCount--
 	}
 	if removeCount != 0 {
 		return nil, fmt.Errorf("%w: not enough active servers", ErrInvalidCommand)
-	}
-	allImmediate := true
-	for _, event := range result {
-		if _, ok := event.(events.ServerDrainingStarted); ok { /* checked below */
-		}
-	}
-	for _, serverID := range serverIDs {
-		if serverHasLoad(state, model.ServerID(serverID), state.Clock.CurrentTime) {
-			allImmediate = false
-		}
 	}
 	if allImmediate {
 		result = append(result, events.OperationSucceeded{OperationID: command.OperationID, CompletedAt: state.Clock.CurrentTime})

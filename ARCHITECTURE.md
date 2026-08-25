@@ -23,7 +23,10 @@
 17. failure deployment без применения эффектов;
 18. построение site logs из request events.
 
-Для следующих срезов уже объявлены остальные события посетителей, экономики и инцидентов. Их обработка в `aggregate`, `state` и `handler` ещё не реализована.
+Также реализованы visitor journeys, почасовое начисление экономики, probes,
+операции desired backend count, DDoS с тремя стратегиями завершения и деградация
+внешнего провайдера. События инцидентов участвуют в capacity, ответах страниц,
+latency, логах и потерянной выручке, а не являются пассивными записями расписания.
 
 ## Поток команды
 
@@ -51,13 +54,13 @@ Deployments выполняются строго по `Sequence`, по одном
 
 Локальное постоянное хранилище разделено на каталог и журналы:
 
-- `catalog.db` (SQLite) хранит только метаданные `worlds` и `runs`, необходимые для поиска, фильтрации по агенту и идемпотентного `/start`;
+- `catalog.db` (SQLite) хранит метаданные `worlds` и `runs`, необходимые для поиска, фильтрации по агенту и идемпотентного `/start`; для отрицательных seed в `definition_json` хранится полное ручное определение мира;
 - события положительного seed в БД не записываются: генератор воспроизводит их заново, а `schedule_hash` из каталога проверяет идентичность результата;
 - у каждого run есть единый append-only journal, содержащий batches доменных `run_events` и пары `agent_request received/completed` в общем порядке;
 - активный segment имеет расширение `.log`; при достижении 32 MiB он закрывается, сжимается Zstd в `.log.zst`, после чего открывается следующий segment;
 - каждая бинарная запись имеет sequence и CRC32C; оборванный хвост активного segment отбрасывается при восстановлении, повреждение закрытого segment считается ошибкой.
 
-Физический путь run строится по SHA-256 от `run_id`: `runs/<2 hex>/<full hash>/journal/000001.log`. Это не позволяет `run_id` выйти за storage root. Один вызов `EventStore.Append` хранится одной frame, поэтому batch событий команды не может быть частично replayed. Snapshot-таблиц и snapshot-файлов нет. `CachedEventStore` может ускорять активные runs, но после потери cache полный `State` восстанавливается из journal.
+Физический путь run строится по SHA-256 от `run_id`: `runs/<2 hex>/<full hash>/journal/000001.log`. Это не позволяет `run_id` выйти за storage root. Небольшой `EventStore.Append` хранится одной frame, а большой — multipart-последовательностью begin/part/commit; незавершённый multipart batch не replayed. Snapshot-таблиц и snapshot-файлов нет. `CachedEventStore` может ускорять активные runs, но после потери cache полный `State` восстанавливается из journal.
 
 ## World generator
 
@@ -159,3 +162,27 @@ s.Then(
 ```
 
 `Given` напрямую создаёт исторический event stream. `When` проходит полный production-like путь command handler → replay → decision → append. `Then` заново восстанавливает state из event store и проверяет как emitted events, так и результат replay.
+
+## Application layer для HTTP API
+
+HTTP transport реализуется тонким адаптером над `internal/application`:
+
+- `StartRunService` создаёт или находит мир, выдаёт криптографически случайный
+  base62 `run_id`, довосстанавливает bootstrap и schedule после прерванной записи
+  и поддерживает идемпотентный `/v1/start`;
+- `RunManager` лениво открывает `RunSession`, ограничивает число runs в памяти,
+  не допускает два одновременных запроса к одному run и разрешает параллельную
+  работу разных runs;
+- до agent request записывается audit `received`, после него — `completed`; API
+  key удаляется из audit headers;
+- реальное время синхронизируется перед действием, а `/time/advance` применяет
+  один интервал `max(real_elapsed, requested_duration)`; отметка последнего
+  реального запроса хранится в SQLite и восстанавливается после рестарта;
+- `RunService` предоставляет application-операции для overview, metrics, logs,
+  resources, fixes, deployments, operations, probes, economy и time advance;
+- `Projection` строит ответы из state и records открытой сессии без повторного
+  disk replay на каждый GET;
+- `StaticAgentAuthorizer`, валидаторы публичных ID и `ClassifyError` отделяют
+  authentication и HTTP error mapping от доменной модели;
+- `AuditQuery` читает историю вызовов для операторской debug-страницы, не
+  продвигая симуляционное время.

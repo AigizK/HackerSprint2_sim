@@ -6,6 +6,7 @@ import "time"
 // are bytes rather than JSON so even malformed agent input remains auditable.
 type AgentRequestReceived struct {
 	RequestID  string              `json:"request_id"`
+	CommandID  string              `json:"command_id,omitempty"`
 	AgentID    string              `json:"agent_id,omitempty"`
 	Method     string              `json:"method"`
 	Path       string              `json:"path"`

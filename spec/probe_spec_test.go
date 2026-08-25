@@ -40,8 +40,12 @@ func TestProbeObservesCapacityBugAndDeploymentErrors(t *testing.T) {
 		s := newCapacityScenario(t, "run-probe-capacity-error", 100)
 		s.When(s.User.OpensPage("visitor-using-capacity", "visitor-1", model.PageProductList, ""))
 		s.When(s.User.ProbesPage("probe-capacity-error", model.PageProductList, ""))
+		probeError := logsEntryForProbe("probe-capacity-error", model.PageProductList, 500, model.FailureServerCapacityExceeded)
+		probeError.Message = "server capacity exceeded: required=100 available=0"
 		s.Then(s.Future.Logs(spec.LogsQuery{}, spec.LogsView{Logs: []spec.RequestLogView{
-			{Entry: logsEntryForProbe("probe-capacity-error", model.PageProductList, 500, model.FailureServerCapacityExceeded), LoadUnits: 100},
+			{Entry: logs.Entry{Timestamp: worldStartsAt, RequestID: "visitor-using-capacity", Source: model.RequestSourceVisitor,
+				VisitorID: "visitor-1", Page: model.PageProductList, StatusCode: 200}, LoadUnits: 100, ServerID: capacityServerID},
+			{Entry: probeError, LoadUnits: 100},
 		}}))
 	})
 
@@ -53,18 +57,19 @@ func TestProbeObservesCapacityBugAndDeploymentErrors(t *testing.T) {
 			s.Bug.Activated(pageBugID, model.PageProduct, "product-1", 1_000_000, correctFixText),
 		)
 		s.When(s.User.ProbesPage("probe-bug-error", model.PageProduct, "product-1"))
-		s.Then(s.Future.Logs(spec.LogsQuery{}, spec.LogsView{Logs: []spec.RequestLogView{
-			{Entry: logsEntryForProbe("probe-bug-error", model.PageProduct, 500, model.FailurePageBug)},
-		}}))
+		expected := logsEntryForProbe("probe-bug-error", model.PageProduct, 500, model.FailurePageBug)
+		expected.ProductID = "product-1"
+		expected.Message = "чтоб этот баг пропал полностью, надо сделать фикс с текстом " + correctFixText
+		s.Then(s.Future.Logs(spec.LogsQuery{}, spec.LogsView{Logs: []spec.RequestLogView{{Entry: expected}}}))
 	})
 
 	t.Run("deployment", func(t *testing.T) {
 		s := newDeploymentScenario(t, "run-probe-deployment-error", 50, 0)
 		s.When(s.Deployment.Start("probe-deployment", firstDeploymentID, "probe-deployment-operation"))
 		s.When(s.User.ProbesPage("probe-deployment-error", model.PageProductList, ""))
-		s.Then(s.Future.Logs(spec.LogsQuery{}, spec.LogsView{Logs: []spec.RequestLogView{
-			{Entry: logsEntryForProbe("probe-deployment-error", model.PageProductList, 500, model.FailureDeployment), LoadUnits: 50},
-		}}))
+		expected := logsEntryForProbe("probe-deployment-error", model.PageProductList, 500, model.FailureDeployment)
+		expected.Message = "deployment in progress: " + string(firstDeploymentID)
+		s.Then(s.Future.Logs(spec.LogsQuery{}, spec.LogsView{Logs: []spec.RequestLogView{{Entry: expected, LoadUnits: 50}}}))
 	})
 }
 

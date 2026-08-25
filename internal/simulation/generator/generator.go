@@ -167,6 +167,12 @@ func verifyCatalogWorld(catalog, generated WorldDefinition) error {
 	return nil
 }
 
+// HashWorldEvents exposes the same canonical hash used by generated worlds so
+// operator-created negative-seed worlds can be registered safely.
+func HashWorldEvents(bootstrap []events.Event, schedule events.EventSchedule) (string, error) {
+	return hashWorldEvents(bootstrap, schedule)
+}
+
 type generatedProduct struct {
 	id                  model.ProductID
 	price               int64
@@ -186,12 +192,13 @@ func (g *Generator) generateBootstrap(random deterministicRandom, at time.Time) 
 		config := g.profile.Infrastructure.Pages[string(page)]
 		load := random.int64Range(config.LoadUnits, "page:"+string(page)+":load")
 		hold := random.int64Range(config.ResourceHoldSeconds, "page:"+string(page)+":hold")
+		latency := random.int64Range(config.BaseLatencyMS, "page:"+string(page)+":latency")
 		pageStates[page] = PageConfig{LoadUnits: IntRange{Min: load, Max: load}, ResourceHoldSeconds: IntRange{Min: hold, Max: hold}}
-		result = append(result, events.PageConfigured{Page: page, LoadUnits: load, HoldDuration: time.Duration(hold) * time.Second, ConfiguredAt: at})
+		result = append(result, events.PageConfigured{Page: page, LoadUnits: load, HoldDuration: time.Duration(hold) * time.Second, BaseLatency: time.Duration(latency) * time.Millisecond, ConfiguredAt: at})
 	}
 	result = append(result,
 		events.InfrastructureConfigured{ServerProvisioningDuration: time.Duration(g.profile.Infrastructure.ServerProvisioningSeconds) * time.Second, ConfiguredAt: at},
-		events.EconomyConfigured{InitialBalanceMinor: g.profile.Economy.InitialBalanceMinor, StopRunOnNegativeBalance: g.profile.Economy.StopRunWhenBalanceIsNegative, ServerBillingPeriod: time.Duration(g.profile.Economy.ServerBillingPeriodSeconds) * time.Second, ConfiguredAt: at},
+		events.EconomyConfigured{Currency: g.profile.Economy.Currency, InitialBalanceMinor: g.profile.Economy.InitialBalanceMinor, StopRunOnNegativeBalance: g.profile.Economy.StopRunWhenBalanceIsNegative, ServerBillingPeriod: time.Duration(g.profile.Economy.ServerBillingPeriodSeconds) * time.Second, ConfiguredAt: at},
 	)
 	for index := 1; index <= g.profile.Infrastructure.InitialBackendInstances; index++ {
 		serverID := model.ServerID(fmt.Sprintf("server-initial-%d", index))

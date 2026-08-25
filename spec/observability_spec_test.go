@@ -99,8 +99,50 @@ func TestMetricsBuildTimeBucketsAndLatencyPercentiles(t *testing.T) {
 				LatencyP50: 100 * time.Millisecond, LatencyP95: 900 * time.Millisecond,
 			},
 			Series: []spec.MetricPointView{
+				{Timestamp: worldStartsAt, Name: "latency_p50_ms", Page: model.PageProductList, Value: 100},
+				{Timestamp: worldStartsAt, Name: "latency_p95_ms", Page: model.PageProductList, Value: 900},
 				{Timestamp: worldStartsAt, Name: "responses_200", Page: model.PageProductList, Value: 1},
 				{Timestamp: worldStartsAt, Name: "responses_500", Page: model.PageProductList, Value: 1},
+			},
+		},
+	))
+}
+
+func TestMetricsBuildHistoricalInfrastructureAndLoadGauges(t *testing.T) {
+	s := newCapacityScenario(t, "run-metrics-gauge-history", 60)
+	s.When(
+		s.User.OpensPage("gauge-load", "visitor-1", model.PageProductList, ""),
+		s.Time.Advance(0, 5*time.Minute),
+		s.Server.Add("gauge-scale", "gauge-operation", secondServerID, 100, 1_000),
+		s.Time.Advance(0, 5*time.Minute),
+	)
+
+	s.Then(s.Future.Metrics(
+		spec.MetricsQuery{
+			From: worldStartsAt, To: worldStartsAt.Add(10 * time.Minute), Step: 5 * time.Minute,
+			Names: []string{"server_count", "capacity_units", "used_load_units", "capacity_utilization", "active_requests"},
+		},
+		spec.MetricsView{
+			Current: spec.MetricSnapshotView{
+				ServerCount: 2, CapacityUnits: 200, Responses200: 1, ServerCostMinor: 1_000,
+				ByPage: []spec.PageMetricView{{Page: model.PageProductList, Responses200: 1}},
+			},
+			Series: []spec.MetricPointView{
+				{Timestamp: worldStartsAt, Name: "active_requests", Value: 1},
+				{Timestamp: worldStartsAt, Name: "capacity_units", Value: 100},
+				{Timestamp: worldStartsAt, Name: "capacity_utilization", Value: 0.6},
+				{Timestamp: worldStartsAt, Name: "server_count", Value: 1},
+				{Timestamp: worldStartsAt, Name: "used_load_units", Value: 60},
+				{Timestamp: worldStartsAt.Add(5 * time.Minute), Name: "active_requests", Value: 1},
+				{Timestamp: worldStartsAt.Add(5 * time.Minute), Name: "capacity_units", Value: 100},
+				{Timestamp: worldStartsAt.Add(5 * time.Minute), Name: "capacity_utilization", Value: 0.6},
+				{Timestamp: worldStartsAt.Add(5 * time.Minute), Name: "server_count", Value: 1},
+				{Timestamp: worldStartsAt.Add(5 * time.Minute), Name: "used_load_units", Value: 60},
+				{Timestamp: worldStartsAt.Add(10 * time.Minute), Name: "active_requests", Value: 0},
+				{Timestamp: worldStartsAt.Add(10 * time.Minute), Name: "capacity_units", Value: 200},
+				{Timestamp: worldStartsAt.Add(10 * time.Minute), Name: "capacity_utilization", Value: 0},
+				{Timestamp: worldStartsAt.Add(10 * time.Minute), Name: "server_count", Value: 2},
+				{Timestamp: worldStartsAt.Add(10 * time.Minute), Name: "used_load_units", Value: 0},
 			},
 		},
 	))

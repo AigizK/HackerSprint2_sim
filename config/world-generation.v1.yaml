@@ -93,19 +93,22 @@ infrastructure:
   server_capacity_units: 100
   # Calibrated so an inefficient six-server policy exhausts its balance in
   # nine of ten deterministic calibration worlds.
-  server_cost_per_hour_minor: 25947000
+  server_cost_per_hour_minor: 25700000
   server_provisioning_seconds: 300
   server_graceful_drain_seconds: 600
   pages:
     product_list:
       load_units: {min: 8, max: 14}
       resource_hold_seconds: {min: 2, max: 8}
+      base_latency_ms: {min: 40, max: 120}
     product_page:
       load_units: {min: 12, max: 22}
       resource_hold_seconds: {min: 3, max: 12}
+      base_latency_ms: {min: 60, max: 180}
     purchase:
       load_units: {min: 25, max: 40}
       resource_hold_seconds: {min: 5, max: 20}
+      base_latency_ms: {min: 100, max: 300}
 
 bugs:
   initial_bug_count: {min: 1, max: 4}
@@ -169,6 +172,7 @@ ddos:
       load_units_per_request: {min: 5, max: 20}
 
 economy:
+  currency: USD
   # Working-capital reserve prevents otherwise viable worlds from stopping on
   # a first-day cash-flow dip; long-term survival still depends on efficiency.
   initial_balance_minor: 58000000000

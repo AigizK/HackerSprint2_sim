@@ -21,6 +21,7 @@ var (
 	ErrInvalidCommand        = errors.New("invalid command")
 	ErrInvalidEvent          = errors.New("invalid event")
 	ErrDeploymentLocked      = errors.New("deployment is locked")
+	ErrDeploymentNotFound    = errors.New("deployment not found")
 	ErrDeploymentInProgress  = errors.New("deployment is already in progress")
 	ErrDeploymentApplied     = errors.New("deployment is already applied")
 	ErrIdempotencyConflict   = errors.New("idempotency key was reused with another payload")
@@ -160,7 +161,7 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: applied duration does not follow max(real, requested)", ErrInvalidEvent)
 		}
 		if event.CommandID != "" {
-			if err := s.recordCommand(event.CommandID, fmt.Sprintf("time:%d:%d", event.RealElapsed, event.RequestedDuration)); err != nil {
+			if err := s.recordCommand(event.CommandID, timeCommandPayload(event.RealElapsed, event.RequestedDuration)); err != nil {
 				return err
 			}
 		}
@@ -178,13 +179,14 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: invalid run completion", ErrInvalidEvent)
 		}
 		s.Status = RunCompleted
+		s.EndReason = event.Reason
 		return nil
 
 	case events.PageConfigured:
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
-		if !validPage(event.Page) || event.LoadUnits <= 0 || event.HoldDuration <= 0 ||
+		if !validPage(event.Page) || event.LoadUnits <= 0 || event.HoldDuration <= 0 || event.BaseLatency < 0 ||
 			!event.ConfiguredAt.Equal(s.Clock.CurrentTime) {
 			return fmt.Errorf("%w: invalid page configuration", ErrInvalidEvent)
 		}
@@ -198,6 +200,7 @@ func (s *State) Apply(event events.Event) error {
 			Page:         event.Page,
 			LoadUnits:    event.LoadUnits,
 			HoldDuration: event.HoldDuration,
+			BaseLatency:  event.BaseLatency,
 			ConfiguredAt: event.ConfiguredAt,
 		}
 		return nil
@@ -405,6 +408,19 @@ func (s *State) Apply(event events.Event) error {
 		}
 		operation.Status = model.OperationStatusRunning
 		operation.StartedAt = event.StartedAt
+		s.Operations[event.OperationID] = operation
+		return nil
+
+	case events.OperationProgressed:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		operation, exists := s.Operations[event.OperationID]
+		if !exists || operation.Status != model.OperationStatusRunning || event.ProgressPPM > ProbabilityScale ||
+			event.ProgressPPM < operation.ProgressPPM || !event.UpdatedAt.Equal(s.Clock.CurrentTime) {
+			return fmt.Errorf("%w: operation %q cannot progress", ErrInvalidEvent, event.OperationID)
+		}
+		operation.ProgressPPM = event.ProgressPPM
 		s.Operations[event.OperationID] = operation
 		return nil
 
@@ -660,6 +676,11 @@ func (s *State) Apply(event events.Event) error {
 			s.SeenRequests = make(map[model.RequestID]struct{})
 		}
 		s.SeenRequests[event.RequestID] = struct{}{}
+		if event.Source == model.RequestSourceProbe {
+			if err := s.recordCommand(model.CommandID(event.RequestID), fmt.Sprintf("probe:%s:%s", event.Page, event.ProductID)); err != nil {
+				return err
+			}
+		}
 		s.Requests[event.RequestID] = PageRequestState{
 			ID:        event.RequestID,
 			Source:    event.Source,
@@ -687,7 +708,7 @@ func (s *State) Apply(event events.Event) error {
 		}
 		page := s.Pages[request.Page]
 		if event.ReleasesAt != event.AcceptedAt.Add(page.HoldDuration) ||
-			serverAvailableCapacity(*s, server.ID, event.AcceptedAt) < request.LoadUnits {
+			serverAvailableCapacity(*s, server.ID, request.Page, event.AcceptedAt) < request.LoadUnits {
 			return fmt.Errorf("%w: invalid capacity allocation for request %q", ErrInvalidEvent, event.RequestID)
 		}
 		if s.Capacity == nil {
@@ -744,12 +765,15 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: request %q does not exist", ErrInvalidEvent, event.RequestID)
 		}
 		if request.Status != model.PageRequestInProgress || !validFactTime(*s, event.CompletedAt) ||
-			(request.LoadUnits > 0 && event.ServerID != request.ServerID) {
+			(request.LoadUnits > 0 && event.ServerID != request.ServerID) || event.Latency < 0 ||
+			(event.StatusCode != 200 && event.StatusCode != 500) ||
+			(event.StatusCode == 200 && event.ErrorCode != "") {
 			return fmt.Errorf("%w: request %q cannot be completed", ErrInvalidEvent, event.RequestID)
 		}
 		request.StatusCode = event.StatusCode
 		request.ErrorCode = event.ErrorCode
 		request.Message = event.Message
+		request.Latency = event.Latency
 		request.CompletedAt = event.CompletedAt
 		if event.StatusCode >= 200 && event.StatusCode < 300 {
 			request.Status = model.PageRequestSucceeded
@@ -851,10 +875,14 @@ func (s *State) Apply(event events.Event) error {
 		if err := ensureRunning(*s); err != nil {
 			return err
 		}
-		if event.InitialBalanceMinor <= 0 || !event.StopRunOnNegativeBalance || event.ServerBillingPeriod <= 0 ||
+		if event.Currency == "" {
+			event.Currency = "USD"
+		}
+		if len(event.Currency) != 3 || event.InitialBalanceMinor <= 0 || !event.StopRunOnNegativeBalance || event.ServerBillingPeriod <= 0 ||
 			!event.ConfiguredAt.Equal(s.Clock.CurrentTime) || s.Economy.InitialBalanceMinor != 0 {
 			return fmt.Errorf("%w: invalid economy configuration", ErrInvalidEvent)
 		}
+		s.Economy.Currency = event.Currency
 		s.Economy.InitialBalanceMinor = event.InitialBalanceMinor
 		s.Economy.StopRunOnNegative = event.StopRunOnNegativeBalance
 		s.Economy.ServerBillingPeriod = event.ServerBillingPeriod
@@ -905,7 +933,7 @@ func (s *State) Apply(event events.Event) error {
 		if err := ensureRunExists(*s); err != nil {
 			return err
 		}
-		if event.AttackID == "" || event.Kind != model.AttackDDoS || !validPage(event.TargetPage) ||
+		if event.AttackID == "" || (event.Kind != model.AttackDDoS && event.Kind != model.AttackBruteForce) || !validPage(event.TargetPage) ||
 			event.RequestsPerMinute <= 0 || event.LoadUnitsPerRequest <= 0 ||
 			(event.Resolution != model.AttackScaleOrExpiry && event.Resolution != model.AttackFixOrExpiry && event.Resolution != model.AttackExpiryOnly) ||
 			!event.ExpectedEndAt.After(event.StartedAt) || !validFactTime(*s, event.StartedAt) {
@@ -926,11 +954,64 @@ func (s *State) Apply(event events.Event) error {
 			return err
 		}
 		attack, exists := s.ActiveAttacks[event.AttackID]
-		if !exists || event.EndedAt.Before(attack.ExpectedEndAt) || !validFactTime(*s, event.EndedAt) {
+		if !exists {
+			if _, resolved := s.ResolvedAttacks[event.AttackID]; resolved && validFactTime(*s, event.EndedAt) {
+				s.markScheduled(event, event.EndedAt)
+				return nil
+			}
+			return fmt.Errorf("%w: traffic attack cannot end", ErrInvalidEvent)
+		}
+		if event.EndedAt.Before(attack.ExpectedEndAt) || !validFactTime(*s, event.EndedAt) {
 			return fmt.Errorf("%w: traffic attack cannot end", ErrInvalidEvent)
 		}
 		delete(s.ActiveAttacks, event.AttackID)
+		s.ResolvedAttacks[event.AttackID] = struct{}{}
 		s.markScheduled(event, event.EndedAt)
+		return nil
+
+	case events.TrafficAttackMitigated:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		attack, exists := s.ActiveAttacks[event.AttackID]
+		fix, fixExists := s.Fixes[event.CommandID]
+		if !exists || attack.Resolution != model.AttackFixOrExpiry || !fixExists || fix.Status != model.FixSubmitted ||
+			!event.MitigatedAt.Equal(s.Clock.CurrentTime) || event.MitigatedAt.After(attack.ExpectedEndAt) {
+			return fmt.Errorf("%w: traffic attack cannot be mitigated", ErrInvalidEvent)
+		}
+		delete(s.ActiveAttacks, event.AttackID)
+		s.ResolvedAttacks[event.AttackID] = struct{}{}
+		fix.Status = model.FixAccepted
+		fix.AttackID = event.AttackID
+		fix.CompletedAt = event.MitigatedAt
+		s.Fixes[event.CommandID] = fix
+		return nil
+
+	case events.ExternalProviderDegraded:
+		if err := ensureRunning(*s); err != nil {
+			return err
+		}
+		if event.ProviderID == "" || event.FailureProbabilityPPM > ProbabilityScale || event.AdditionalLatency < 0 ||
+			!validFactTime(*s, event.DegradedAt) {
+			return fmt.Errorf("%w: invalid provider degradation", ErrInvalidEvent)
+		}
+		if _, exists := s.DegradedProviders[event.ProviderID]; exists {
+			return fmt.Errorf("%w: provider already degraded", ErrInvalidEvent)
+		}
+		s.DegradedProviders[event.ProviderID] = ProviderState{ID: event.ProviderID, FailureProbabilityPPM: event.FailureProbabilityPPM,
+			AdditionalLatency: event.AdditionalLatency, DegradedAt: event.DegradedAt}
+		s.markScheduled(event, event.DegradedAt)
+		return nil
+
+	case events.ExternalProviderRecovered:
+		if err := ensureRunExists(*s); err != nil {
+			return err
+		}
+		if _, exists := s.DegradedProviders[event.ProviderID]; !exists || !validFactTime(*s, event.RecoveredAt) {
+			return fmt.Errorf("%w: provider cannot recover", ErrInvalidEvent)
+		}
+		delete(s.DegradedProviders, event.ProviderID)
+		s.markScheduled(event, event.RecoveredAt)
 		return nil
 
 	case events.ProductSelected:
@@ -988,13 +1069,13 @@ func (s *State) markScheduled(event events.Event, occursAt time.Time) {
 	}
 }
 
-func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time) int64 {
+func serverAvailableCapacity(state State, serverID model.ServerID, page model.PageType, at time.Time) int64 {
 	server, exists := state.Servers[serverID]
 	if !exists || server.Status != model.ServerActive {
 		return 0
 	}
 	if state.CapacityIndexedAt.Equal(at) {
-		return server.CapacityUnits - state.UsedCapacityByServer[serverID]
+		return server.CapacityUnits - state.UsedCapacityByServer[serverID] - ddosLoadPerActiveServer(state, page)
 	}
 	used := int64(0)
 	for _, allocation := range state.Capacity {
@@ -1002,7 +1083,29 @@ func serverAvailableCapacity(state State, serverID model.ServerID, at time.Time)
 			used += allocation.LoadUnits
 		}
 	}
-	return server.CapacityUnits - used
+	return server.CapacityUnits - used - ddosLoadPerActiveServer(state, page)
+}
+
+func ddosLoadPerActiveServer(state State, page model.PageType) int64 {
+	activeServers := int64(0)
+	for _, server := range state.Servers {
+		if server.Status == model.ServerActive {
+			activeServers++
+		}
+	}
+	if activeServers == 0 {
+		return 0
+	}
+	hold := state.Pages[page].HoldDuration
+	var total int64
+	for _, attack := range state.ActiveAttacks {
+		if attack.TargetPage != page || attack.Resolution != model.AttackScaleOrExpiry {
+			continue
+		}
+		concurrent := (attack.RequestsPerMinute*int64(hold) + int64(time.Minute) - 1) / int64(time.Minute)
+		total += concurrent * attack.LoadUnitsPerRequest
+	}
+	return (total + activeServers - 1) / activeServers
 }
 
 func serverHasLoad(state State, serverID model.ServerID, at time.Time) bool {

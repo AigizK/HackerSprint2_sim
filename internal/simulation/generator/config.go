@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -93,6 +94,7 @@ type InfrastructureConfig struct {
 type PageConfig struct {
 	LoadUnits           IntRange `yaml:"load_units"`
 	ResourceHoldSeconds IntRange `yaml:"resource_hold_seconds"`
+	BaseLatencyMS       IntRange `yaml:"base_latency_ms"`
 }
 
 type BugsConfig struct {
@@ -138,6 +140,7 @@ type DDoSKindConfig struct {
 }
 
 type EconomyConfig struct {
+	Currency                     string `yaml:"currency"`
 	InitialBalanceMinor          int64  `yaml:"initial_balance_minor"`
 	StopRunWhenBalanceIsNegative bool   `yaml:"stop_run_when_balance_is_negative"`
 	ServerBillingPeriodSeconds   int64  `yaml:"server_billing_period_seconds"`
@@ -239,7 +242,7 @@ func (p WorldGenerationProfile) Validate() error {
 	}
 	for _, page := range []string{"product_list", "product_page", "purchase"} {
 		config, exists := p.Infrastructure.Pages[page]
-		if !exists || !validPositiveRange(config.LoadUnits) || !validPositiveRange(config.ResourceHoldSeconds) {
+		if !exists || !validPositiveRange(config.LoadUnits) || !validPositiveRange(config.ResourceHoldSeconds) || !validPositiveRange(config.BaseLatencyMS) {
 			return invalid("invalid or missing page configuration for %q", page)
 		}
 		if config.LoadUnits.Max > p.Infrastructure.ServerCapacityUnits {
@@ -276,7 +279,7 @@ func (p WorldGenerationProfile) Validate() error {
 			}
 		}
 	}
-	if p.Economy.InitialBalanceMinor <= 0 || !p.Economy.StopRunWhenBalanceIsNegative ||
+	if len(p.Economy.Currency) != 3 || p.Economy.Currency != strings.ToUpper(p.Economy.Currency) || p.Economy.InitialBalanceMinor <= 0 || !p.Economy.StopRunWhenBalanceIsNegative ||
 		p.Economy.ServerBillingPeriodSeconds <= 0 || p.Economy.ServerBillingRounding != "ceil" {
 		return invalid("invalid economy configuration")
 	}

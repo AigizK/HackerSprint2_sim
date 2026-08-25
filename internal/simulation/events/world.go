@@ -7,6 +7,7 @@ type PageConfigured struct {
 	Page         PageType
 	LoadUnits    int64
 	HoldDuration time.Duration
+	BaseLatency  time.Duration
 	ConfiguredAt time.Time
 }
 

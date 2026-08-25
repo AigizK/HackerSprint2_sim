@@ -174,6 +174,8 @@ func dereferenceEvent(event events.Event) events.Event {
 		return *event
 	case *events.TrafficAttackEnded:
 		return *event
+	case *events.TrafficAttackMitigated:
+		return *event
 	case *events.ExternalProviderDegraded:
 		return *event
 	case *events.ExternalProviderRecovered:
@@ -234,6 +236,7 @@ var eventFactories = map[string]func() events.Event{
 	"RevenueLost":                           func() events.Event { return &events.RevenueLost{} },
 	"TrafficAttackStarted":                  func() events.Event { return &events.TrafficAttackStarted{} },
 	"TrafficAttackEnded":                    func() events.Event { return &events.TrafficAttackEnded{} },
+	"TrafficAttackMitigated":                func() events.Event { return &events.TrafficAttackMitigated{} },
 	"ExternalProviderDegraded":              func() events.Event { return &events.ExternalProviderDegraded{} },
 	"ExternalProviderRecovered":             func() events.Event { return &events.ExternalProviderRecovered{} },
 }

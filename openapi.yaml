@@ -296,9 +296,9 @@ paths:
       operationId: applyFix
       summary: Применить fix по тексту из site logs
       description: |
-        Если `message` совпадает с fix-текстом активного бага, баг полностью
-        деактивируется и больше не вызывает ошибки. Повтор с тем же `request_id`
-        возвращает исходный результат.
+        Если `message` совпадает с fix-текстом активного бага или DDoS-события,
+        требующего mitigation, причина ошибки полностью деактивируется. Повтор с
+        тем же `request_id` возвращает исходный результат.
       parameters:
         - $ref: '#/components/parameters/RunId'
       requestBody:
@@ -1103,6 +1103,9 @@ components:
         fixed_bug:
           type: [string, 'null']
           description: Публичный ID исправленного бага или null при несовпадении
+        fixed_attack:
+          type: [string, 'null']
+          description: Публичный ID остановленной атаки или null
         message:
           type: string
 
@@ -1206,7 +1209,7 @@ components:
           $ref: '#/components/schemas/PageType'
         product_id:
           type: string
-          description: Обязателен для `product_page`; допустим для `purchase`
+          description: Обязателен для `product_page` и `purchase`; запрещён для `product_list`
 
     ProbeResponse:
       type: object
