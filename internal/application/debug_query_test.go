@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/persistence"
+	"github.com/aigizk/hackersprint2-sim/internal/persistence/journal"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/generator"
 )
 
 func TestDebugQueryListsAllAgentsWithoutAdvancingRuns(t *testing.T) {
@@ -17,7 +19,9 @@ func TestDebugQueryListsAllAgentsWithoutAdvancingRuns(t *testing.T) {
 	}
 	defer storage.Close()
 	startsAt := time.Date(2032, 3, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := RegisterManualWorld(ctx, storage.Catalog, ManualWorldInput{Seed: -1, StartsAt: startsAt, EndsAt: startsAt.Add(time.Hour)}); err != nil {
+	evaluation := generator.WorldEvaluation{MaximumBalanceMinor: 1_000_000, AgentRequestCount: 4,
+		AgentRequestDuration: 10 * time.Second, MinimumRealTime: 40 * time.Second}
+	if _, err := RegisterManualWorld(ctx, storage.Catalog, ManualWorldInput{Seed: -1, StartsAt: startsAt, EndsAt: startsAt.Add(time.Hour), Evaluation: evaluation}); err != nil {
 		t.Fatal(err)
 	}
 	start := NewStartRunService(storage.Catalog, storage.Journal, nil, storage.Journal)
@@ -44,12 +48,25 @@ func TestDebugQueryListsAllAgentsWithoutAdvancingRuns(t *testing.T) {
 	}
 	runID := runs[0].Run.RunID
 	versionBefore := runs[0].EventCount
+	requestStarted := startsAt.Add(-time.Hour)
+	if err := storage.Journal.RecordAgentRequest(ctx, runID, journal.AgentRequestReceived{RequestID: "audit-1", Method: "GET", Path: "/overview", ReceivedAt: requestStarted}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Journal.CompleteAgentRequest(ctx, runID, journal.AgentRequestCompleted{RequestID: "audit-1", StatusCode: 200, CompletedAt: requestStarted.Add(12 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
 	recordBefore, err := storage.Catalog.GetRun(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := query.Overview(ctx, runID); err != nil {
+	debugOverview, err := query.Overview(ctx, runID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !debugOverview.HasBenchmark || debugOverview.Evaluation.MaximumBalanceMinor != 1_000_000 ||
+		debugOverview.ActualAgentRequestCount != 1 || debugOverview.ActualModeledRealTime != 10*time.Second ||
+		debugOverview.ActualWallClockRealTime != 12*time.Second {
+		t.Fatalf("debug benchmark = %#v", debugOverview)
 	}
 	if _, _, err := query.Logs(ctx, runID, simulation.LogsQuery{Limit: 200}); err != nil {
 		t.Fatal(err)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/aigizk/hackersprint2-sim/internal/application"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/generator"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/logs"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
@@ -26,8 +27,11 @@ type fakeQuery struct {
 func (f fakeQuery) Runs(context.Context, string, int, int) ([]application.DebugRunSummary, error) {
 	return []application.DebugRunSummary{{Run: f.run, Seed: 1, EventCount: 42, AgentRequestCount: 7, Overview: f.overview, Economy: f.economy}}, nil
 }
-func (f fakeQuery) Overview(context.Context, string) (simulation.RunRecord, simulation.OverviewView, error) {
-	return f.run, f.overview, nil
+func (f fakeQuery) Overview(context.Context, string) (application.DebugRunOverview, error) {
+	return application.DebugRunOverview{Run: f.run, Overview: f.overview, Economy: f.economy, HasBenchmark: true,
+		Evaluation: generator.WorldEvaluation{MaximumBalanceMinor: 24690, AgentRequestCount: 4, AgentRequestDuration: 10 * time.Second, MinimumRealTime: 40 * time.Second},
+		ScoreRatio: .5, BalanceGapMinor: 12345, ActualAgentRequestCount: 8,
+		ActualModeledRealTime: 80 * time.Second, ActualWallClockRealTime: 3 * time.Second}, nil
 }
 func (f fakeQuery) Logs(context.Context, string, simulation.LogsQuery) (simulation.RunRecord, simulation.LogsView, error) {
 	view := simulation.RequestLogView{Entry: logs.Entry{
@@ -54,7 +58,7 @@ func TestDebugPagesLinkRunProjections(t *testing.T) {
 
 	checks := map[string][]string{
 		"/debug/":                                {testRunID, "agent-one", "123.45 USD", "/overview"},
-		"/debug/runs/" + testRunID + "/overview": {"Run status", "degraded", "123.45"},
+		"/debug/runs/" + testRunID + "/overview": {"Run status", "degraded", "World benchmark", "50.00%", "8", "1m20s"},
 		"/debug/runs/" + testRunID + "/logs":     {"SERVER_CAPACITY_EXCEEDED", "request-1", "Economy"},
 		"/debug/runs/" + testRunID + "/economy":  {"Successful purchases", "3", "123.45 USD"},
 	}

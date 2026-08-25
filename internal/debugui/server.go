@@ -18,7 +18,7 @@ const runsPerPage = 50
 
 type queryService interface {
 	Runs(context.Context, string, int, int) ([]application.DebugRunSummary, error)
-	Overview(context.Context, string) (simulation.RunRecord, simulation.OverviewView, error)
+	Overview(context.Context, string) (application.DebugRunOverview, error)
 	Logs(context.Context, string, simulation.LogsQuery) (simulation.RunRecord, simulation.LogsView, error)
 	Economy(context.Context, string) (simulation.RunRecord, simulation.EconomyView, error)
 }
@@ -111,17 +111,17 @@ func (s *Server) handleRuns(writer http.ResponseWriter, request *http.Request) {
 type runPage struct {
 	RunID string
 	Run   simulation.RunRecord
-	View  simulation.OverviewView
+	View  application.DebugRunOverview
 }
 
 func (s *Server) handleOverview(writer http.ResponseWriter, request *http.Request) {
 	runID := request.PathValue("run_id")
-	run, view, err := s.query.Overview(request.Context(), runID)
+	view, err := s.query.Overview(request.Context(), runID)
 	if err != nil {
 		s.writeError(writer, err)
 		return
 	}
-	s.render(writer, s.overview, runPage{RunID: runID, Run: run, View: view})
+	s.render(writer, s.overview, runPage{RunID: runID, Run: view.Run, View: view})
 }
 
 type logsPage struct {
