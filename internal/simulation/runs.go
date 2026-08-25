@@ -31,5 +31,6 @@ type RunRepository interface {
 	GetRun(ctx context.Context, runID string) (RunRecord, error)
 	FindByStartRequest(ctx context.Context, agentID, agentVersion, requestID string) (RunRecord, error)
 	TouchRun(ctx context.Context, runID string, lastRealRequestAt time.Time) error
+	ListRuns(ctx context.Context, limit, offset int) ([]RunRecord, error)
 	ListRunsByAgent(ctx context.Context, agentID string, limit, offset int) ([]RunRecord, error)
 }

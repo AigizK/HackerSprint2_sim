@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/application"
+	"github.com/aigizk/hackersprint2-sim/internal/debugui"
 	"github.com/aigizk/hackersprint2-sim/internal/httpapi"
 	"github.com/aigizk/hackersprint2-sim/internal/persistence"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/generator"
@@ -48,10 +49,16 @@ func run() error {
 	manager := application.NewRunManager(storage.Catalog, storage.Journal, storage.Journal, *maxCachedRuns)
 	startService := application.NewStartRunService(storage.Catalog, storage.Journal, worldGenerator, storage.Journal)
 	runService := application.NewRunService(manager)
+	debugQuery := application.NewDebugQuery(storage.Catalog, storage.Journal, storage.Journal)
+	debugHandler := debugui.New(debugQuery)
+	rootHandler := http.NewServeMux()
+	rootHandler.Handle("/debug", debugHandler)
+	rootHandler.Handle("/debug/", debugHandler)
+	rootHandler.Handle("/", httpapi.New(startService, runService))
 
 	server := &http.Server{
 		Addr:              *address,
-		Handler:           httpapi.New(startService, runService),
+		Handler:           rootHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,

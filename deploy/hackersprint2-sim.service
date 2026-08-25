@@ -1,0 +1,37 @@
+[Unit]
+Description=HackerSprint2 e-commerce simulation API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hackersprint2-sim
+Group=hackersprint2-sim
+WorkingDirectory=/opt/hackersprint2-sim
+ExecStart=/opt/hackersprint2-sim/bin/hackersprint2-sim -addr 0.0.0.0:8080 -data /var/lib/hackersprint2-sim -config /opt/hackersprint2-sim/config/world-generation.v1.yaml
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+LimitNOFILE=65536
+UMask=0027
+
+StateDirectory=hackersprint2-sim
+StateDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

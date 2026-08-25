@@ -222,11 +222,22 @@ func (s *Store) FindByStartRequest(ctx context.Context, agentID, agentVersion, r
 	return scanRun(s.db.QueryRowContext(ctx, runSelect+` WHERE agent_id = ? AND agent_version = ? AND start_request_id = ?`, agentID, agentVersion, requestID))
 }
 
+func (s *Store) ListRuns(ctx context.Context, limit, offset int) ([]simulation.RunRecord, error) {
+	if limit < 1 || limit > 1000 || offset < 0 {
+		return nil, fmt.Errorf("invalid run list query")
+	}
+	return s.listRuns(ctx, runSelect+` ORDER BY created_at DESC, run_id LIMIT ? OFFSET ?`, limit, offset)
+}
+
 func (s *Store) ListRunsByAgent(ctx context.Context, agentID string, limit, offset int) ([]simulation.RunRecord, error) {
 	if agentID == "" || limit < 1 || limit > 1000 || offset < 0 {
 		return nil, fmt.Errorf("invalid run list query")
 	}
-	rows, err := s.db.QueryContext(ctx, runSelect+` WHERE agent_id = ? ORDER BY created_at DESC, run_id LIMIT ? OFFSET ?`, agentID, limit, offset)
+	return s.listRuns(ctx, runSelect+` WHERE agent_id = ? ORDER BY created_at DESC, run_id LIMIT ? OFFSET ?`, agentID, limit, offset)
+}
+
+func (s *Store) listRuns(ctx context.Context, query string, arguments ...any) ([]simulation.RunRecord, error) {
+	rows, err := s.db.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, err
 	}
