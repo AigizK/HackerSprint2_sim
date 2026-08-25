@@ -1,13 +1,15 @@
 version: calibration.v1
 runs: 10
 first_seed: 1
-target_scheduled_events: 1000
+target_scheduled_events: 100000
 max_world_events: 10000000
 max_run_events: 10000000
-target_early_negative: 0
+target_early_negative: 9
+target_completed_runs: 1
 
 bad_agent:
   # Deliberately wasteful policy: immediately provision six backend servers,
-  # never fix page bugs and advance the world in one-day observation steps.
+  # never fix page bugs and check the world hourly. Hourly steps ensure a run
+  # that exhausts its balance on the last day is stopped before world end.
   desired_backend_instances: 6
-  advance_step_hours: 24
+  advance_step_hours: 1

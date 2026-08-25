@@ -16,9 +16,9 @@ import (
 
 type runResult struct {
 	seed, worldEvents, runEvents, visitors, maxDailyVisitors, maxDailyDelta int
-	endedAt                                                                 time.Time
+	endedAt, worldEndsAt                                                    time.Time
 	reason                                                                  string
-	balanceMinor, maximumBalanceMinor                                       int64
+	balanceMinor, revenueMinor, serverCostMinor, maximumBalanceMinor        int64
 }
 
 type calibrationConfig struct {
@@ -29,6 +29,7 @@ type calibrationConfig struct {
 	MaxWorldEvents        int            `yaml:"max_world_events"`
 	MaxRunEvents          int            `yaml:"max_run_events"`
 	TargetEarlyNegative   int            `yaml:"target_early_negative"`
+	TargetCompletedRuns   int            `yaml:"target_completed_runs"`
 	BadAgent              badAgentConfig `yaml:"bad_agent"`
 }
 
@@ -81,9 +82,9 @@ func run() error {
 		results = append(results, result)
 	}
 
-	earlyNegative, maxWorldEvents, maxRunEvents, maxDailyVisitors, maxDailyDelta := 0, 0, 0, 0, 0
+	earlyNegative, completedRuns, maxWorldEvents, maxRunEvents, maxDailyVisitors, maxDailyDelta := 0, 0, 0, 0, 0, 0
 	minimumMaximumBalance := int64(^uint64(0) >> 1)
-	fmt.Println("seed world_events run_events visitors max_daily max_delta ended_at reason balance_minor maximum_balance_minor")
+	fmt.Println("seed world_events run_events visitors max_daily max_delta ended_at reason balance_minor revenue_minor server_cost_minor maximum_balance_minor")
 	for _, result := range results {
 		maxWorldEvents = max(maxWorldEvents, result.worldEvents)
 		maxRunEvents = max(maxRunEvents, result.runEvents)
@@ -92,17 +93,20 @@ func run() error {
 		if result.maximumBalanceMinor < minimumMaximumBalance {
 			minimumMaximumBalance = result.maximumBalanceMinor
 		}
-		if result.reason == "negative_balance" && result.endedAt.Before(profileEnd(profile)) {
+		if result.endedAt.Equal(result.worldEndsAt) {
+			completedRuns++
+		}
+		if result.reason == "negative_balance" && result.endedAt.Before(result.worldEndsAt) {
 			earlyNegative++
 		}
-		fmt.Printf("%d %d %d %d %d %d %s %s %d %d\n", result.seed, result.worldEvents, result.runEvents,
+		fmt.Printf("%d %d %d %d %d %d %s %s %d %d %d %d\n", result.seed, result.worldEvents, result.runEvents,
 			result.visitors, result.maxDailyVisitors, result.maxDailyDelta, result.endedAt.Format(time.RFC3339), result.reason,
-			result.balanceMinor, result.maximumBalanceMinor)
+			result.balanceMinor, result.revenueMinor, result.serverCostMinor, result.maximumBalanceMinor)
 	}
-	fmt.Printf("summary runs=%d max_world_events=%d max_run_events=%d early_negative=%d min_maximum_balance_minor=%d max_daily_visitors=%d max_daily_delta=%d\n",
-		len(results), maxWorldEvents, maxRunEvents, earlyNegative, minimumMaximumBalance, maxDailyVisitors, maxDailyDelta)
+	fmt.Printf("summary runs=%d completed_runs=%d max_world_events=%d max_run_events=%d early_negative=%d min_maximum_balance_minor=%d max_daily_visitors=%d max_daily_delta=%d\n",
+		len(results), completedRuns, maxWorldEvents, maxRunEvents, earlyNegative, minimumMaximumBalance, maxDailyVisitors, maxDailyDelta)
 	if maxWorldEvents > calibration.MaxWorldEvents || maxRunEvents > calibration.MaxRunEvents ||
-		earlyNegative != calibration.TargetEarlyNegative || minimumMaximumBalance <= 0 {
+		earlyNegative != calibration.TargetEarlyNegative || completedRuns != calibration.TargetCompletedRuns || minimumMaximumBalance <= 0 {
 		return fmt.Errorf("calibration gates failed")
 	}
 	return nil
@@ -148,8 +152,10 @@ func simulateBadRun(world generator.WorldDefinition, badAgent badAgentConfig) (r
 	visitors, maxDailyVisitors, maxDailyDelta := trafficStats(world)
 	return runResult{
 		seed: int(world.Key.Seed), worldEvents: len(world.Bootstrap) + len(world.Events), runEvents: runEventCount,
-		endedAt: state.Clock.CurrentTime, reason: calibrationEndReason(state),
+		endedAt: state.Clock.CurrentTime, worldEndsAt: world.EndsAt, reason: calibrationEndReason(state),
 		balanceMinor:        state.Economy.InitialBalanceMinor + state.Economy.RevenueMinor - state.Economy.ServerCostMinor - state.Economy.DeploymentCostMinor,
+		revenueMinor:        state.Economy.RevenueMinor,
+		serverCostMinor:     state.Economy.ServerCostMinor,
 		maximumBalanceMinor: world.Evaluation.MaximumBalanceMinor,
 		visitors:            visitors, maxDailyVisitors: maxDailyVisitors, maxDailyDelta: maxDailyDelta,
 	}, nil
@@ -218,13 +224,10 @@ func decodeCalibration(reader io.Reader) (calibrationConfig, error) {
 	}
 	if config.Version == "" || config.Runs <= 0 || config.FirstSeed <= 0 || config.TargetScheduledEvents <= 0 || config.MaxWorldEvents <= 0 ||
 		config.MaxRunEvents <= 0 || config.TargetEarlyNegative < 0 || config.TargetEarlyNegative > config.Runs ||
+		config.TargetCompletedRuns < 0 || config.TargetCompletedRuns > config.Runs ||
+		config.TargetEarlyNegative+config.TargetCompletedRuns != config.Runs ||
 		config.BadAgent.DesiredBackendInstances < 0 || config.BadAgent.AdvanceStepHours <= 0 {
 		return calibrationConfig{}, fmt.Errorf("invalid calibration config")
 	}
 	return config, nil
-}
-
-func profileEnd(profile generator.WorldGenerationProfile) time.Time {
-	end, _ := time.Parse(time.RFC3339, profile.Clock.EndsAt)
-	return end
 }
