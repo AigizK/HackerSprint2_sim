@@ -165,7 +165,9 @@ s.Then(
 
 ## Application layer для HTTP API
 
-HTTP transport реализуется тонким адаптером над `internal/application`:
+HTTP transport в `internal/httpapi` реализован тонким адаптером над
+`internal/application`; production-like процесс запуска находится в `cmd/server`
+и доступен через `make serve`:
 
 - `StartRunService` создаёт или находит мир, выдаёт криптографически случайный
   base62 `run_id`, довосстанавливает bootstrap и schedule после прерванной записи
@@ -182,7 +184,7 @@ HTTP transport реализуется тонким адаптером над `in
   resources, fixes, deployments, operations, probes, economy и time advance;
 - `Projection` строит ответы из state и records открытой сессии без повторного
   disk replay на каждый GET;
-- `StaticAgentAuthorizer`, валидаторы публичных ID и `ClassifyError` отделяют
-  authentication и HTTP error mapping от доменной модели;
+- валидаторы публичных ID и `ClassifyError` отделяют HTTP validation и error
+  mapping от доменной модели; игровая версия transport не требует authentication;
 - `AuditQuery` читает историю вызовов для операторской debug-страницы, не
   продвигая симуляционное время.

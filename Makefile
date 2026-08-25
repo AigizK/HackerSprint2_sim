@@ -1,4 +1,4 @@
-.PHONY: specs world generate-world calibrate run-daily-agent
+.PHONY: specs world generate-world calibrate run-daily-agent serve
 
 SEED ?=
 DB ?= data/catalog.db
@@ -19,3 +19,6 @@ calibrate:
 run-daily-agent:
 	@if [ -z "$(SEED)" ]; then echo "usage: make run-daily-agent SEED=1"; exit 2; fi
 	go run ./cmd/dailyagent -seed "$(SEED)" -config "$(WORLD_CONFIG)" -data data
+
+serve:
+	go run ./cmd/server -addr "$${ADDR:-:8080}" -data "$${DATA:-data}" -config "$(WORLD_CONFIG)"

@@ -2,6 +2,9 @@ openapi: 3.1.1
 info:
   title: E-commerce Simulation Agent API
   version: 0.1.0
+  license:
+    name: UNLICENSED
+    identifier: LicenseRef-Proprietary
   summary: API для агента, управляющего интернет-магазином в симуляции
   description: |
     Публичный HTTP API для запуска детерминированной симуляции и управления
@@ -33,16 +36,14 @@ info:
     `/time/advance` применяется `max(real_elapsed, requested_duration)`. Явно
     запросить продвижение менее чем на 300 секунд нельзя.
 
-    `agent_id` и `agent_version` используются для атрибуции и фильтрации запусков,
-    но не являются подтверждением личности. Доступ авторизуется API key из
-    заголовка `X-Agent-API-Key`.
+    `agent_id` и `agent_version` используются для атрибуции и фильтрации запусков.
+    Эта игровая версия API не выполняет аутентификацию агента.
 
 servers:
   - url: /
     description: Тот же origin, с которого получен OpenAPI-документ
 
-security:
-  - AgentApiKey: []
+security: []
 
 tags:
   - name: Run lifecycle
@@ -509,15 +510,6 @@ paths:
           $ref: '#/components/responses/Conflict'
 
 components:
-  securitySchemes:
-    AgentApiKey:
-      type: apiKey
-      in: header
-      name: X-Agent-API-Key
-      description: |
-        Ключ выдаётся оператором симуляции. Сервер может проверять, что переданный
-        в `/start` `agent_id` разрешён для этого ключа.
-
   parameters:
     RunId:
       name: run_id
@@ -799,9 +791,7 @@ components:
         - server_cost_minor
 
     MetricValue:
-      oneOf:
-        - type: integer
-        - type: number
+      type: number
 
     MetricPoint:
       type: object
