@@ -134,14 +134,6 @@ func (e *WorldEvaluator) Evaluate(world WorldDefinition) (WorldEvaluation, error
 	}
 
 	serverCost := minimumServerCost(world, e.config, requiredServers, readyAt)
-	if maximumRevenue < serverCost {
-		maximumRevenue = 0
-		maximumPurchases = 0
-		serverCost = 0
-		requiredServers = 0
-		readyAt = world.StartsAt
-		neededBugs = nil
-	}
 	plan := []OracleAction{{Kind: "start", At: world.StartsAt}}
 	bugs = bugs[:0]
 	for _, bug := range neededBugs {

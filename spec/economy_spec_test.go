@@ -85,6 +85,7 @@ func TestProvisioningServerIsNotBilled(t *testing.T) {
 
 func TestDrainingServerContinuesToBeBilled(t *testing.T) {
 	s := newCapacityScenario(t, "run-cost-draining-server", 50)
+	s.Given(s.Server.Active(secondServerID, 100, 1_000))
 	s.When(s.User.OpensPage("request-keeping-cost-server-busy", "visitor-1", model.PageProductList, ""))
 	s.When(s.Server.Remove("cost-remove", "cost-remove-operation", capacityServerID))
 	s.When(s.Time.Advance(5*time.Minute, 0))

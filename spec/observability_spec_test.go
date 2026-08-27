@@ -17,15 +17,17 @@ func TestOverviewIsDerivedFromStateAndRequestHistory(t *testing.T) {
 	)
 
 	s.Then(s.Future.Overview(spec.OverviewView{
-		SimulationTime:      worldStartsAt,
-		SimulationEndsAt:    worldStartsAt.Add(24 * time.Hour),
-		Remaining:           24 * time.Hour,
-		RunStatus:           "running",
-		SiteStatus:          "degraded",
-		ServerCount:         1,
-		CapacityUtilization: 0.6,
-		ErrorRate:           0.5,
-		BalanceMinor:        0,
+		SimulationTime:       worldStartsAt,
+		SimulationEndsAt:     worldStartsAt.Add(24 * time.Hour),
+		Remaining:            24 * time.Hour,
+		RunStatus:            "running",
+		SiteStatus:           "degraded",
+		ServerCount:          1,
+		CapacityUtilization:  0.6,
+		ErrorRate:            0.5,
+		VisitorRequestsTotal: 2,
+		VisitorErrorRate:     0.5,
+		BalanceMinor:         0,
 	}))
 }
 
@@ -224,15 +226,16 @@ func TestResourcesExcludeExpiredAllocationsAndDrainingCapacity(t *testing.T) {
 
 	t.Run("draining server", func(t *testing.T) {
 		s := newCapacityScenario(t, "run-resources-draining", 100)
+		s.Given(s.Server.Active(secondServerID, 100, 1_000))
 		s.When(s.User.OpensPage("resource-draining", "visitor-1", model.PageProductList, ""))
 		s.When(s.Server.Remove("remove-draining", "remove-draining-operation", capacityServerID))
 		s.Then(s.Future.Resources(spec.ResourcesView{
-			DesiredInstances: 0, ActiveInstances: 0, TotalCapacityUnits: 0,
-			UsedLoadUnits: 100, TotalCostPerHourMinor: 1_000,
-			Servers: []spec.ServerResourceView{{
-				ServerID: capacityServerID, Status: model.ServerDraining,
-				CapacityUnits: 100, UsedLoadUnits: 100, CostPerHourMinor: 1_000,
-			}},
+			DesiredInstances: 1, ActiveInstances: 1, TotalCapacityUnits: 100,
+			UsedLoadUnits: 100, TotalCostPerHourMinor: 2_000,
+			Servers: []spec.ServerResourceView{
+				{ServerID: capacityServerID, Status: model.ServerDraining, CapacityUnits: 100, UsedLoadUnits: 100, CostPerHourMinor: 1_000},
+				{ServerID: secondServerID, Status: model.ServerActive, CapacityUnits: 100, CostPerHourMinor: 1_000},
+			},
 		}))
 	})
 }

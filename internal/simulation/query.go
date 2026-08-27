@@ -17,20 +17,23 @@ import (
 var ErrProjectionNotFound = errors.New("projection not found")
 
 type OverviewView struct {
-	RunID               string
-	SimulationTime      time.Time
-	SimulationEndsAt    time.Time
-	Remaining           time.Duration
-	RunStatus           string
-	SiteStatus          string
-	CurrentDeploymentID model.DeploymentID
-	ServerCount         int
-	CapacityUtilization float64
-	ErrorRate           float64
-	BalanceMinor        int64
-	SuccessfulPurchases uint64
-	RevenueMinor        int64
-	ServerCostMinor     int64
+	RunID                string
+	SimulationTime       time.Time
+	SimulationEndsAt     time.Time
+	Remaining            time.Duration
+	RunStatus            string
+	SiteStatus           string
+	CurrentDeploymentID  model.DeploymentID
+	ServerCount          int
+	CapacityUtilization  float64
+	ErrorRate            float64
+	RequestsTotal        uint64
+	VisitorErrorRate     float64
+	VisitorRequestsTotal uint64
+	BalanceMinor         int64
+	SuccessfulPurchases  uint64
+	RevenueMinor         int64
+	ServerCostMinor      int64
 }
 type MetricSnapshotView struct {
 	ServerCount                                     int
@@ -40,6 +43,9 @@ type MetricSnapshotView struct {
 	CapacityUtilization                             float64
 	Responses200, Responses500                      uint64
 	ErrorRate                                       float64
+	VisitorRequestsTotal                            uint64
+	VisitorResponses200, VisitorResponses500        uint64
+	VisitorErrorRate                                float64
 	LatencyP50, LatencyP95                          time.Duration
 	SuccessfulPurchases                             uint64
 	RevenueMinor, LostRevenueMinor, ServerCostMinor int64
@@ -174,7 +180,8 @@ func (p Projection) Overview() OverviewView {
 	}
 	return OverviewView{RunID: state.RunID, SimulationTime: state.Clock.CurrentTime, SimulationEndsAt: state.Clock.EndsAt, Remaining: remaining,
 		RunStatus: publicStatus, SiteStatus: site, CurrentDeploymentID: state.ActiveDeployment,
-		ServerCount: metrics.ServerCount, CapacityUtilization: util, ErrorRate: metrics.ErrorRate,
+		ServerCount: metrics.ServerCount, CapacityUtilization: util, ErrorRate: metrics.ErrorRate, RequestsTotal: metrics.RequestsTotal,
+		VisitorErrorRate: metrics.VisitorErrorRate, VisitorRequestsTotal: metrics.VisitorRequestsTotal,
 		SuccessfulPurchases: state.Economy.SuccessfulPurchases, RevenueMinor: state.Economy.RevenueMinor,
 		ServerCostMinor: state.Economy.ServerCostMinor,
 		BalanceMinor:    state.Economy.InitialBalanceMinor + state.Economy.RevenueMinor - state.Economy.ServerCostMinor - state.Economy.DeploymentCostMinor}
@@ -263,9 +270,11 @@ func buildMetrics(records []StoredEvent, state State, query MetricsQuery) Metric
 	seriesRequested := !query.From.IsZero() || !query.To.IsZero()
 	wants := func(name string) bool { return seriesRequested && (len(selected) == 0 || selected[name]) }
 	requestPages := make(map[model.RequestID]model.PageType)
+	requestSources := make(map[model.RequestID]model.RequestSource)
 	for _, record := range records {
 		if started, ok := record.Event.(events.PageRequestStarted); ok {
 			requestPages[started.RequestID] = started.Page
+			requestSources[started.RequestID] = started.Source
 			continue
 		}
 		event, ok := record.Event.(events.PageRequestCompleted)
@@ -284,9 +293,17 @@ func buildMetrics(records []StoredEvent, state State, query MetricsQuery) Metric
 		if event.StatusCode >= 500 {
 			current.Responses500++
 			p.Responses500++
+			if requestSources[event.RequestID] == model.RequestSourceVisitor {
+				current.VisitorRequestsTotal++
+				current.VisitorResponses500++
+			}
 		} else if event.StatusCode >= 200 && event.StatusCode < 300 {
 			current.Responses200++
 			p.Responses200++
+			if requestSources[event.RequestID] == model.RequestSourceVisitor {
+				current.VisitorRequestsTotal++
+				current.VisitorResponses200++
+			}
 		}
 		if event.Latency > 0 {
 			latencies = append(latencies, event.Latency)
@@ -368,6 +385,9 @@ func buildMetrics(records []StoredEvent, state State, query MetricsQuery) Metric
 	total := current.Responses200 + current.Responses500
 	if total > 0 {
 		current.ErrorRate = float64(current.Responses500) / float64(total)
+	}
+	if current.VisitorRequestsTotal > 0 {
+		current.VisitorErrorRate = float64(current.VisitorResponses500) / float64(current.VisitorRequestsTotal)
 	}
 	if current.CapacityUnits > 0 {
 		current.CapacityUtilization = float64(current.UsedLoadUnits) / float64(current.CapacityUnits)

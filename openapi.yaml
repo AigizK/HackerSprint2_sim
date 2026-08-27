@@ -1024,7 +1024,7 @@ components:
           $ref: '#/components/schemas/Clock'
         desired_instances:
           type: integer
-          minimum: 0
+          minimum: 1
         active_instances:
           type: integer
           minimum: 0
@@ -1051,7 +1051,7 @@ components:
           $ref: '#/components/schemas/RequestId'
         desired_instances:
           type: integer
-          minimum: 0
+          minimum: 1
           maximum: 1000
 
     OperationAcceptedResponse:

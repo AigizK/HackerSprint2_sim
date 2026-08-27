@@ -3,6 +3,7 @@ package spec_test
 import (
 	"testing"
 
+	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
@@ -234,6 +235,7 @@ func TestIdleServerIsRemovedImmediately(t *testing.T) {
 func TestBusyServerIsRemovedOnlyAfterItsLoadIsReleased(t *testing.T) {
 	s := newCapacityScenario(t, "run-remove-busy-server", capacityServerUnits)
 	requestID := model.RequestID("request-keeping-server-busy")
+	s.Given(s.Server.Active(secondServerID, capacityServerUnits, capacityCostPerHour))
 
 	s.When(
 		s.User.OpensPage(requestID, "visitor-1", model.PageProductList, ""),
@@ -248,7 +250,7 @@ func TestBusyServerIsRemovedOnlyAfterItsLoadIsReleased(t *testing.T) {
 			events.BackendScaleRequested{
 				CommandID:        removeCommandID,
 				OperationID:      removeOperationID,
-				DesiredInstances: 0,
+				DesiredInstances: 1,
 				RequestedAt:      worldStartsAt,
 			},
 			events.OperationQueued{
@@ -278,6 +280,10 @@ func TestBusyServerIsRemovedOnlyAfterItsLoadIsReleased(t *testing.T) {
 				ServerID: capacityServerID, From: worldStartsAt, To: worldStartsAt.Add(capacityHoldDuration),
 				BilledHours: 1, AmountMinor: capacityCostPerHour,
 			},
+			events.InfrastructureCostAccrued{
+				ServerID: secondServerID, From: worldStartsAt, To: worldStartsAt.Add(capacityHoldDuration),
+				BilledHours: 1, AmountMinor: capacityCostPerHour,
+			},
 			events.ServerRemoved{
 				OperationID: removeOperationID,
 				ServerID:    capacityServerID,
@@ -290,6 +296,11 @@ func TestBusyServerIsRemovedOnlyAfterItsLoadIsReleased(t *testing.T) {
 		),
 		s.State.HasNoServer(capacityServerID),
 	)
+}
+
+func TestLastBackendServerCannotBeRemoved(t *testing.T) {
+	s := newCapacityScenario(t, "run-keep-last-server", capacityServerUnits)
+	s.WhenFails(simulation.ErrInvalidCommand, s.Server.Remove(removeCommandID, removeOperationID, capacityServerID))
 }
 
 func addServerEvents() []events.Event {

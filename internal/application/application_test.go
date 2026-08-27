@@ -131,6 +131,9 @@ func TestRunServiceCoversEveryOpenAPIOperationAfterStart(t *testing.T) {
 	assert("metrics", response, err)
 	response, err = service.Resources(ctx, runID, req("GET", "/resources", ""))
 	assert("resources", response, err)
+	if _, err = service.ScaleBackend(ctx, runID, req("PUT", "/resources/backend", "scale-zero"), 0); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("scale to zero error = %v, want %v", err, ErrInvalidRequest)
+	}
 	response, err = service.ScaleBackend(ctx, runID, req("PUT", "/resources/backend", "scale-1"), 1)
 	assert("scale", response, err)
 	response, err = service.ApplyFix(ctx, runID, req("POST", "/fixes", "fix-1"), fixText)

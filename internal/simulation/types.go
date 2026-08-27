@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	ProbabilityScale   uint32        = 1_000_000
-	MinExplicitAdvance time.Duration = 5 * time.Minute
+	ProbabilityScale        uint32        = 1_000_000
+	MinimumBackendInstances               = 1
+	MinExplicitAdvance      time.Duration = 5 * time.Minute
 )
 
 type RunStatus string

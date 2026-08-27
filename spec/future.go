@@ -14,16 +14,18 @@ import (
 var ErrFutureDriverNotImplemented = errors.New("future simulation driver is not implemented")
 
 type OverviewView struct {
-	SimulationTime      time.Time
-	SimulationEndsAt    time.Time
-	Remaining           time.Duration
-	RunStatus           string
-	SiteStatus          string
-	CurrentDeploymentID model.DeploymentID
-	ServerCount         int
-	CapacityUtilization float64
-	ErrorRate           float64
-	BalanceMinor        int64
+	SimulationTime       time.Time
+	SimulationEndsAt     time.Time
+	Remaining            time.Duration
+	RunStatus            string
+	SiteStatus           string
+	CurrentDeploymentID  model.DeploymentID
+	ServerCount          int
+	CapacityUtilization  float64
+	ErrorRate            float64
+	VisitorRequestsTotal uint64
+	VisitorErrorRate     float64
+	BalanceMinor         int64
 }
 
 type MetricSnapshotView struct {

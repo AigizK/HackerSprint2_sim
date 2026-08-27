@@ -34,10 +34,15 @@ func TestSetBackendDesiredInstancesAddsAndRemovesRequiredServers(t *testing.T) {
 		},
 	}))
 
-	s.When(s.Server.SetDesired("scale-to-zero", "scale-to-zero-operation", 0))
+	s.When(s.Server.SetDesired("scale-to-one", "scale-to-one-operation", 1))
 	s.Then(s.Future.Resources(spec.ResourcesView{
-		DesiredInstances: 0, ActiveInstances: 0, TotalCapacityUnits: 0,
+		DesiredInstances: 1, ActiveInstances: 1, TotalCapacityUnits: 100, TotalCostPerHourMinor: 1_000,
+		Servers: []spec.ServerResourceView{
+			{ServerID: capacityServerID, Status: model.ServerActive, CapacityUnits: 100, CostPerHourMinor: 1_000},
+		},
 	}))
+
+	s.WhenFails(simulation.ErrInvalidCommand, s.Server.SetDesired("scale-to-zero", "scale-to-zero-operation", 0))
 }
 
 func TestOperationProjectionTracksRunningAndSucceededScaling(t *testing.T) {

@@ -25,12 +25,14 @@ type fakeQuery struct {
 }
 
 func (f fakeQuery) Runs(context.Context, string, int, int) ([]application.DebugRunSummary, error) {
-	return []application.DebugRunSummary{{Run: f.run, Seed: 1, EventCount: 42, AgentRequestCount: 7, Overview: f.overview, Economy: f.economy}}, nil
+	return []application.DebugRunSummary{{Run: f.run, Seed: 1, EventCount: 42, AgentRequestCount: 7, Overview: f.overview, Economy: f.economy,
+		Availability: .96, SLOEvaluated: true, SLOPassed: true, ProfitMinor: 3000}}, nil
 }
 func (f fakeQuery) Overview(context.Context, string) (application.DebugRunOverview, error) {
 	return application.DebugRunOverview{Run: f.run, Overview: f.overview, Economy: f.economy, HasBenchmark: true,
-		Evaluation: generator.WorldEvaluation{MaximumBalanceMinor: 24690, AgentRequestCount: 4, AgentRequestDuration: 10 * time.Second, MinimumRealTime: 40 * time.Second},
-		ScoreRatio: .5, BalanceGapMinor: 12345, ActualAgentRequestCount: 8,
+		Evaluation:   generator.WorldEvaluation{MaximumBalanceMinor: 24690, MaximumRevenueMinor: 7000, MinimumServerCostMinor: 1000, AgentRequestCount: 4, AgentRequestDuration: 10 * time.Second, MinimumRealTime: 40 * time.Second},
+		Availability: .96, MinimumAvailability: .95, SLOEvaluated: true, SLOPassed: true,
+		ProfitMinor: 3000, MaximumProfitMinor: 6000, ScoreRatio: .5, ProfitGapMinor: 3000, ActualAgentRequestCount: 8,
 		ActualModeledRealTime: 80 * time.Second, ActualWallClockRealTime: 3 * time.Second}, nil
 }
 func (f fakeQuery) Logs(context.Context, string, simulation.LogsQuery) (simulation.RunRecord, simulation.LogsView, error) {
@@ -49,16 +51,16 @@ func TestDebugPagesLinkRunProjections(t *testing.T) {
 	now := time.Date(2032, 4, 1, 12, 0, 0, 0, time.UTC)
 	query := fakeQuery{
 		run: simulation.RunRecord{RunID: testRunID, AgentID: "agent-one", AgentVersion: "v1", CreatedAt: now},
-		overview: simulation.OverviewView{RunID: testRunID, RunStatus: "running", SiteStatus: "degraded", SimulationTime: now,
-			SimulationEndsAt: now.Add(time.Hour), Remaining: time.Hour, ServerCount: 1, BalanceMinor: 12345},
+		overview: simulation.OverviewView{RunID: testRunID, RunStatus: "completed", SiteStatus: "degraded", SimulationTime: now,
+			SimulationEndsAt: now, ServerCount: 1, RequestsTotal: 100, ErrorRate: .04, VisitorRequestsTotal: 100, VisitorErrorRate: .04, BalanceMinor: 12345},
 		economy: simulation.EconomyView{Currency: "USD", SuccessfulPurchases: 3, RevenueMinor: 3000, BalanceMinor: 12345},
 	}
 	server := httptest.NewServer(New(query))
 	t.Cleanup(server.Close)
 
 	checks := map[string][]string{
-		"/debug/":                                {testRunID, "agent-one", "123.45 USD", "/overview"},
-		"/debug/runs/" + testRunID + "/overview": {"Run status", "degraded", "World benchmark", "50.00%", "8", "1m20s"},
+		"/debug/":                                {testRunID, "agent-one", "profit 30.00 USD", "SLO passed", "/overview"},
+		"/debug/runs/" + testRunID + "/overview": {"Run status", "degraded", "World benchmark", "SLO status", "Operating profit", "50.00%", "8", "1m20s"},
 		"/debug/runs/" + testRunID + "/logs":     {"SERVER_CAPACITY_EXCEEDED", "request-1", "Economy"},
 		"/debug/runs/" + testRunID + "/economy":  {"Successful purchases", "3", "123.45 USD"},
 	}

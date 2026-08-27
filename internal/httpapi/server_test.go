@@ -182,6 +182,12 @@ func TestHTTPValidationAndErrorsFollowOpenAPI(t *testing.T) {
 	if stringField(t, missingRequired, "error") != "INVALID_REQUEST" {
 		t.Fatalf("missing desired_instances = %#v", missingRequired)
 	}
+	zeroDesired := callJSON(t, api, http.MethodPut, "/v1/runs/"+runID+"/resources/backend", map[string]any{
+		"request_id": "zero-desired", "desired_instances": 0,
+	}, http.StatusBadRequest)
+	if stringField(t, zeroDesired, "error") != "INVALID_REQUEST" {
+		t.Fatalf("zero desired_instances = %#v", zeroDesired)
+	}
 }
 
 func newTestServer(t *testing.T) (*Server, func(), time.Time) {

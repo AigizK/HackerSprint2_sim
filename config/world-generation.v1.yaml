@@ -88,7 +88,7 @@ catalog:
 
 infrastructure:
   initial_backend_instances: 1
-  min_backend_instances: 0
+  min_backend_instances: 1
   max_backend_instances: 50
   server_capacity_units: 100
   # Calibrated so an inefficient six-server policy exhausts its balance in

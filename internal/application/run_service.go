@@ -108,7 +108,7 @@ func (s *RunService) Operation(ctx context.Context, runID string, request AgentR
 }
 
 func (s *RunService) ScaleBackend(ctx context.Context, runID string, request AgentRequest, desired int) (ApplicationResponse, error) {
-	if desired < 0 || desired > 1000 || !ValidRequestID(string(request.CommandID)) {
+	if desired < simulation.MinimumBackendInstances || desired > 1000 || !ValidRequestID(string(request.CommandID)) {
 		return ApplicationResponse{}, ErrInvalidRequest
 	}
 	operationID := StableOperationID(runID, request.CommandID, "scale")

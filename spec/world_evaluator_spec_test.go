@@ -90,3 +90,13 @@ func TestWorldEvaluatorAccountsForProvisioningBeforeRevenueCanBeEarned(t *testin
 	s.ThenMaximumEconomyIs(1_000, 400, 10_600, 1)
 	s.ThenMinimumAgentTimeIs(4, 40*time.Second) // start + scale + provisioning advance + final advance
 }
+
+func TestWorldEvaluatorKeepsOneBackendServerWhenWorldIsUnprofitable(t *testing.T) {
+	s := newWorldEvaluatorScenario(t)
+	s.config.ServerCostPerHourMinor = 2_000
+	s.WhenWorldIsEvaluated()
+	s.ThenMaximumEconomyIs(2_000, 4_000, 8_000, 2)
+	if s.evaluation.RequiredServerCount != 1 {
+		t.Fatalf("required servers = %d, want 1", s.evaluation.RequiredServerCount)
+	}
+}

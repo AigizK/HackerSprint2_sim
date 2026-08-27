@@ -441,6 +441,15 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		if !exists || server.Status != model.ServerActive {
 			return nil, fmt.Errorf("%w: active server %q does not exist", ErrInvalidCommand, command.ServerID)
 		}
+		managedServers := 0
+		for _, candidate := range state.Servers {
+			if candidate.Status == model.ServerProvisioning || candidate.Status == model.ServerActive || candidate.Status == model.ServerDraining {
+				managedServers++
+			}
+		}
+		if managedServers <= MinimumBackendInstances {
+			return nil, fmt.Errorf("%w: at least %d backend server must remain", ErrInvalidCommand, MinimumBackendInstances)
+		}
 		result := []events.Event{
 			events.BackendScaleRequested{
 				CommandID:        command.CommandID,
@@ -1123,7 +1132,7 @@ func decideDesiredInstances(state State, command SetBackendDesiredInstances) ([]
 	if err := ensureRunning(state); err != nil {
 		return nil, err
 	}
-	if command.CommandID == "" || command.OperationID == "" || command.DesiredInstances < 0 {
+	if command.CommandID == "" || command.OperationID == "" || command.DesiredInstances < MinimumBackendInstances {
 		return nil, fmt.Errorf("%w: invalid desired instance command", ErrInvalidCommand)
 	}
 	if err := ensureNewScaleIdentifiers(state, command.CommandID, command.OperationID); err != nil {

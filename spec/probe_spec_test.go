@@ -32,6 +32,10 @@ func TestProbeCreatesNormalLoadAndProbeLog(t *testing.T) {
 			Entry:     logsEntryForProbe("probe-list", model.PageProductList, 200, ""),
 			LoadUnits: 60, ServerID: capacityServerID,
 		}}}),
+		s.Future.Overview(spec.OverviewView{
+			SimulationTime: worldStartsAt, SimulationEndsAt: worldStartsAt.Add(24 * time.Hour), Remaining: 24 * time.Hour,
+			RunStatus: "running", SiteStatus: "healthy", ServerCount: 1, CapacityUtilization: .6,
+		}),
 	)
 }
 

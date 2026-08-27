@@ -8,6 +8,8 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/generator"
 )
 
+const MinimumAvailabilitySLO = 0.95
+
 // DebugRunSummary is an operator-only, read-only view of one run. Building it
 // replays the durable journal but never advances simulation time and never
 // writes an agent request audit record.
@@ -18,6 +20,10 @@ type DebugRunSummary struct {
 	AgentRequestCount int
 	Overview          simulation.OverviewView
 	Economy           simulation.EconomyView
+	Availability      float64
+	SLOEvaluated      bool
+	SLOPassed         bool
+	ProfitMinor       int64
 	LoadError         string
 }
 
@@ -27,8 +33,14 @@ type DebugRunOverview struct {
 	Economy                 simulation.EconomyView
 	Evaluation              generator.WorldEvaluation
 	HasBenchmark            bool
+	Availability            float64
+	MinimumAvailability     float64
+	SLOEvaluated            bool
+	SLOPassed               bool
+	ProfitMinor             int64
+	MaximumProfitMinor      int64
 	ScoreRatio              float64
-	BalanceGapMinor         int64
+	ProfitGapMinor          int64
 	ActualAgentRequestCount int
 	ActualModeledRealTime   time.Duration
 	ActualWallClockRealTime time.Duration
@@ -82,6 +94,7 @@ func (q *DebugQuery) Runs(ctx context.Context, agentID string, limit, offset int
 		projection := session.Projection()
 		summary.Overview = projection.Overview()
 		summary.Economy = projection.Economy()
+		summary.Availability, summary.SLOEvaluated, summary.SLOPassed, summary.ProfitMinor = runScoreFacts(summary.Overview, summary.Economy)
 		requests, auditErr := q.audit.LoadAgentRequests(ctx, run.RunID)
 		if auditErr != nil {
 			summary.LoadError = auditErr.Error()
@@ -98,16 +111,18 @@ func (q *DebugQuery) Overview(ctx context.Context, runID string) (DebugRunOvervi
 	if err != nil {
 		return DebugRunOverview{}, err
 	}
-	result := DebugRunOverview{Run: run, Overview: projection.Overview(), Economy: projection.Economy()}
+	result := DebugRunOverview{Run: run, Overview: projection.Overview(), Economy: projection.Economy(), MinimumAvailability: MinimumAvailabilitySLO}
+	result.Availability, result.SLOEvaluated, result.SLOPassed, result.ProfitMinor = runScoreFacts(result.Overview, result.Economy)
 	world, err := q.catalog.GetWorld(ctx, run.WorldID)
 	if err != nil {
 		return DebugRunOverview{}, err
 	}
 	result.Evaluation = world.Evaluation
-	result.HasBenchmark = world.Evaluation.MaximumBalanceMinor > 0
-	if result.HasBenchmark {
-		result.ScoreRatio = float64(result.Economy.BalanceMinor) / float64(world.Evaluation.MaximumBalanceMinor)
-		result.BalanceGapMinor = world.Evaluation.MaximumBalanceMinor - result.Economy.BalanceMinor
+	result.MaximumProfitMinor = world.Evaluation.MaximumRevenueMinor - world.Evaluation.MinimumServerCostMinor
+	result.HasBenchmark = result.MaximumProfitMinor > 0
+	if result.HasBenchmark && result.SLOPassed {
+		result.ScoreRatio = float64(result.ProfitMinor) / float64(result.MaximumProfitMinor)
+		result.ProfitGapMinor = result.MaximumProfitMinor - result.ProfitMinor
 	}
 	requests, err := q.audit.LoadAgentRequests(ctx, runID)
 	if err != nil {
@@ -132,6 +147,17 @@ func (q *DebugQuery) Overview(ctx context.Context, runID string) (DebugRunOvervi
 		result.ActualWallClockRealTime = last.Sub(first)
 	}
 	return result, nil
+}
+
+func runScoreFacts(overview simulation.OverviewView, economy simulation.EconomyView) (float64, bool, bool, int64) {
+	availability := float64(0)
+	if overview.VisitorRequestsTotal > 0 {
+		availability = 1 - overview.VisitorErrorRate
+	}
+	evaluated := overview.RunStatus == string(simulation.RunCompleted) || overview.RunStatus == "failed"
+	passed := overview.RunStatus == string(simulation.RunCompleted) && overview.VisitorRequestsTotal > 0 && availability >= MinimumAvailabilitySLO
+	profit := economy.RevenueMinor - economy.ServerCostMinor - economy.DeploymentCostMinor
+	return availability, evaluated, passed, profit
 }
 
 func (q *DebugQuery) Logs(ctx context.Context, runID string, query simulation.LogsQuery) (simulation.RunRecord, simulation.LogsView, error) {

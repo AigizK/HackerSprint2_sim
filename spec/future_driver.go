@@ -21,7 +21,8 @@ func (d *projectionDriver) Overview(id string) (OverviewView, error) {
 	v, e := d.query.Overview(id)
 	return OverviewView{SimulationTime: v.SimulationTime, SimulationEndsAt: v.SimulationEndsAt, Remaining: v.Remaining,
 		RunStatus: v.RunStatus, SiteStatus: v.SiteStatus, CurrentDeploymentID: v.CurrentDeploymentID,
-		ServerCount: v.ServerCount, CapacityUtilization: v.CapacityUtilization, ErrorRate: v.ErrorRate, BalanceMinor: v.BalanceMinor}, e
+		ServerCount: v.ServerCount, CapacityUtilization: v.CapacityUtilization, ErrorRate: v.ErrorRate,
+		VisitorRequestsTotal: v.VisitorRequestsTotal, VisitorErrorRate: v.VisitorErrorRate, BalanceMinor: v.BalanceMinor}, e
 }
 func (d *projectionDriver) Metrics(id string, q MetricsQuery) (MetricsView, error) {
 	v, e := d.query.Metrics(id, simulation.MetricsQuery{From: q.From, To: q.To, Step: q.Step, Names: q.Names, Page: q.Page})
