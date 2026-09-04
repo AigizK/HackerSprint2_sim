@@ -240,8 +240,13 @@ type probeResponse struct {
 }
 
 type advanceTimeRequest struct {
-	RequestID       string `json:"request_id"`
-	DurationSeconds *int64 `json:"duration_seconds"`
+	RequestID       string                    `json:"request_id"`
+	DurationSeconds *int64                    `json:"duration_seconds"`
+	StopWhen        *advanceTimeStopCondition `json:"stop_when,omitempty"`
+}
+
+type advanceTimeStopCondition struct {
+	NewLogErrors *int `json:"new_log_errors"`
 }
 
 type advanceTimeResponse struct {
@@ -251,6 +256,7 @@ type advanceTimeResponse struct {
 	ProcessedEvents          int           `json:"processed_events"`
 	NewLogs                  int           `json:"new_logs"`
 	LogsCursor               *string       `json:"logs_cursor,omitempty"`
+	StopReason               string        `json:"stop_reason"`
 }
 
 type controlCommandRequest struct {

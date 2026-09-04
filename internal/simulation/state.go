@@ -195,18 +195,20 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: applied duration does not match event interval", ErrInvalidEvent)
 		}
 		if event.RealElapsed < 0 || event.RequestedDuration < 0 ||
-			(event.RequestedDuration > 0 && event.RequestedDuration < MinExplicitAdvance) {
+			(event.RequestedDuration > 0 && event.RequestedDuration < MinExplicitAdvance) ||
+			(event.StopOnLogError && event.RequestedDuration < MinExplicitAdvance) {
 			return fmt.Errorf("%w: invalid time durations", ErrInvalidEvent)
 		}
 		expectedApplied := max(event.RealElapsed, event.RequestedDuration)
 		if remaining := s.Clock.EndsAt.Sub(event.From); expectedApplied > remaining {
 			expectedApplied = remaining
 		}
-		if event.AppliedDuration != expectedApplied {
+		if (event.StopOnLogError && event.AppliedDuration > expectedApplied) ||
+			(!event.StopOnLogError && event.AppliedDuration != expectedApplied) {
 			return fmt.Errorf("%w: applied duration does not follow max(real, requested)", ErrInvalidEvent)
 		}
 		if event.CommandID != "" {
-			if err := s.recordCommand(event.CommandID, timeCommandPayload(event.RealElapsed, event.RequestedDuration)); err != nil {
+			if err := s.recordCommand(event.CommandID, timeCommandPayload(event.RealElapsed, event.RequestedDuration, event.StopOnLogError)); err != nil {
 				return err
 			}
 		}

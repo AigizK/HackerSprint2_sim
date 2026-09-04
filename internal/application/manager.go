@@ -10,6 +10,7 @@ import (
 
 	"github.com/aigizk/hackersprint2-sim/internal/persistence/journal"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
@@ -31,6 +32,7 @@ type AgentRequest struct {
 	Headers                map[string][]string
 	Body                   []byte
 	RequestedAdvance       time.Duration
+	StopOnLogError         bool
 }
 
 type ClockEnvelope struct {
@@ -50,6 +52,7 @@ type RunContext struct {
 	RequestedAdvance       time.Duration
 	ProcessedEvents        int
 	NewLogs                int
+	NewLogErrors           int
 	LogsCursor             string
 	Duplicate              bool
 }
@@ -153,6 +156,7 @@ func (m *RunManager) Handle(ctx context.Context, runID string, request AgentRequ
 	}
 	applied := time.Duration(0)
 	processedEvents := 0
+	requestLogErrors := 0
 	duplicate := false
 	if request.CommandID != "" {
 		previous, exists := state.CommandPayloads[request.CommandID]
@@ -171,13 +175,18 @@ func (m *RunManager) Handle(ctx context.Context, runID string, request AgentRequ
 			commandID = request.CommandID
 		}
 		before := state.Clock.CurrentTime
-		decided, execErr := managed.session.Execute(ctx, simulation.AdvanceTime{CommandID: commandID, RealElapsed: realElapsed, RequestedDuration: requested})
+		decided, execErr := managed.session.Execute(ctx, simulation.AdvanceTime{
+			CommandID: commandID, RealElapsed: realElapsed, RequestedDuration: requested,
+			StopOnLogError: request.StopOnLogError,
+		})
 		if execErr != nil {
 			return ApplicationResponse{}, execErr
 		}
 		processedEvents = len(decided)
+		newLogErrors := countLogErrors(decided)
 		state = managed.session.State()
 		applied = state.Clock.CurrentTime.Sub(before)
+		requestLogErrors = newLogErrors
 	}
 	if err := m.catalog.TouchRun(ctx, runID, touchAt); err != nil {
 		return ApplicationResponse{}, err
@@ -190,12 +199,30 @@ func (m *RunManager) Handle(ctx context.Context, runID string, request AgentRequ
 	currentLogCount := managed.session.LogCount()
 	runContext := &RunContext{Run: run, Session: managed.session, State: state, Duplicate: duplicate,
 		PreviousSimulationTime: previousSimulationTime, RequestedAdvance: request.RequestedAdvance,
-		ProcessedEvents: processedEvents, NewLogs: currentLogCount - previousLogCount, LogsCursor: simulation.LogCursor(currentLogCount),
+		ProcessedEvents: processedEvents, NewLogs: currentLogCount - previousLogCount, NewLogErrors: requestLogErrors,
+		LogsCursor: simulation.LogCursor(currentLogCount),
 		Clock: ClockEnvelope{SimulationTime: state.Clock.CurrentTime, SimulationEndsAt: state.Clock.EndsAt, Remaining: remaining,
 			RealElapsed: realElapsed, AppliedAdvance: applied}}
 	response, err = action(ctx, runContext)
 	response.Clock = runContext.Clock
 	return response, err
+}
+
+func countLogErrors(items []events.Event) int {
+	count := 0
+	for _, item := range items {
+		switch event := item.(type) {
+		case events.PageRequestRejected:
+			if event.ErrorCode != "" {
+				count++
+			}
+		case events.PageRequestCompleted:
+			if event.ErrorCode != "" {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func (m *RunManager) open(ctx context.Context, runID string) (*managedRun, error) {

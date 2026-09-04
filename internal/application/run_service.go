@@ -43,6 +43,7 @@ type AdvanceTimeResult struct {
 	ProcessedEvents        int
 	NewLogs                int
 	LogsCursor             string
+	StopReason             string
 }
 
 type FirewallRuleResult struct {
@@ -220,10 +221,19 @@ func (s *RunService) AdvanceTime(ctx context.Context, runID string, request Agen
 		return ApplicationResponse{}, ErrMinimumAdvance
 	}
 	request.ExpectedCommandPayload = fmt.Sprintf("advance:%d", request.RequestedAdvance)
+	if request.StopOnLogError {
+		request.ExpectedCommandPayload += ":new-log-errors=1"
+	}
 	return s.manager.Handle(ctx, runID, request, func(_ context.Context, run *RunContext) (ApplicationResponse, error) {
+		stopReason := "duration_elapsed"
+		if run.State.Status != simulation.RunRunning {
+			stopReason = "run_completed"
+		} else if request.StopOnLogError && run.NewLogErrors > 0 {
+			stopReason = "log_error"
+		}
 		return ApplicationResponse{StatusCode: 200, Value: AdvanceTimeResult{
 			Clock: run.Clock, PreviousSimulationTime: run.PreviousSimulationTime, RequestedDuration: run.RequestedAdvance,
-			ProcessedEvents: run.ProcessedEvents, NewLogs: run.NewLogs, LogsCursor: run.LogsCursor,
+			ProcessedEvents: run.ProcessedEvents, NewLogs: run.NewLogs, LogsCursor: run.LogsCursor, StopReason: stopReason,
 		}}, nil
 	})
 }

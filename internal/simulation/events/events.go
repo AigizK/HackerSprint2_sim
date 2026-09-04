@@ -36,6 +36,7 @@ type TimeAdvanced struct {
 	RealElapsed       time.Duration
 	RequestedDuration time.Duration
 	AppliedDuration   time.Duration
+	StopOnLogError    bool
 }
 
 func (TimeAdvanced) EventType() string { return "TimeAdvanced" }

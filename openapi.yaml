@@ -59,8 +59,9 @@ info:
 
     На каждом запросе к существующему run симуляционное время сначала продвигается
     на реальное время, прошедшее с предыдущего вызова этого run. Для
-    `/time/advance` применяется `max(real_elapsed, requested_duration)`. Явно
-    запросить продвижение менее чем на 300 секунд нельзя.
+    `/time/advance` применяется `max(real_elapsed, requested_duration)`, но
+    опциональное ожидание первой новой ошибки лога может остановить этот интервал
+    раньше. Явно запросить продвижение менее чем на 300 секунд нельзя.
 
     `agent_id` и `agent_version` используются для атрибуции и фильтрации запусков.
     Эта игровая версия API не выполняет аутентификацию самого агента.
@@ -690,8 +691,12 @@ paths:
       summary: Явно прокрутить симуляционное время
       description: |
         `duration_seconds` должен быть не меньше 300. Фактическое продвижение равно
-        `max(real_elapsed_since_previous_request, duration_seconds)`. Повтор с тем же
-        `request_id` не продвигает время второй раз.
+        `max(real_elapsed_since_previous_request, duration_seconds)`, если раньше не
+        сработал `stop_when`. Условие `new_log_errors: 1` останавливает прокрутку на
+        временной метке первой новой записи публичного лога с непустым `error`.
+        Существовавшие до запроса ошибки не учитываются. События с одной временной
+        меткой обрабатываются атомарно. Повтор с тем же `request_id` не продвигает
+        время второй раз; `stop_when` входит в идемпотентный payload.
       parameters:
         - $ref: '#/components/parameters/RunId'
       requestBody:
@@ -702,7 +707,9 @@ paths:
               $ref: '#/components/schemas/AdvanceTimeRequest'
             example:
               request_id: advance-20260824-001
-              duration_seconds: 86400
+              duration_seconds: 3600
+              stop_when:
+                new_log_errors: 1
       responses:
         '200':
           description: Время продвинуто, наступившие события обработаны
@@ -1872,7 +1879,19 @@ components:
         duration_seconds:
           type: integer
           minimum: 300
-          description: Запрошенная прокрутка; минимум пять минут
+          description: Запрошенный интервал прокрутки; минимум пять минут
+        stop_when:
+          $ref: '#/components/schemas/AdvanceTimeStopCondition'
+
+    AdvanceTimeStopCondition:
+      type: object
+      additionalProperties: false
+      required: [new_log_errors]
+      properties:
+        new_log_errors:
+          type: integer
+          const: 1
+          description: Остановиться на первой новой записи публичного лога с непустым error
 
     AdvanceTimeResponse:
       type: object
@@ -1883,6 +1902,7 @@ components:
         - requested_duration_seconds
         - processed_events
         - new_logs
+        - stop_reason
       properties:
         clock:
           $ref: '#/components/schemas/Clock'
@@ -1898,6 +1918,10 @@ components:
         new_logs:
           type: integer
           minimum: 0
+        stop_reason:
+          type: string
+          enum: [duration_elapsed, log_error, run_completed]
+          description: Причина, по которой прокрутка остановилась
         logs_cursor:
           type: [string, 'null']
 

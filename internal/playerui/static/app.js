@@ -41,6 +41,7 @@
       operations: [],
       console: [],
       metricRange: "6h",
+      stopOnLogError: false,
       commandGroup: "all",
       selectedCommand: "",
       commandMode: "visual",
@@ -402,6 +403,7 @@
         <span class="control-label">Промотать</span>
         ${[[300,"+5 мин"],[3600,"+1 час"],[21600,"+6 часов"],[86400,"+1 день"]].map(([seconds,label]) => `<button class="button secondary compact" data-advance="${seconds}" ${readonly ? "disabled" : ""}>${label}</button>`).join("")}
         <div class="custom-duration"><input id="duration-value" type="number" min="1" value="30" ${readonly ? "disabled" : ""}><select id="duration-unit" ${readonly ? "disabled" : ""}><option value="60">минут</option><option value="3600">часов</option><option value="86400">дней</option></select><button class="button secondary compact" id="advance-custom" ${readonly ? "disabled" : ""}>Применить</button></div>
+        <label class="alert-stop-control" title="Остановить прокрутку на первой новой ошибке в логе"><input id="stop-on-log-error" type="checkbox" ${runtime.stopOnLogError ? "checked" : ""} ${readonly ? "disabled" : ""}><span>до 1 ошибки</span></label>
         <button class="button danger compact" id="finish-run" ${readonly ? "disabled" : ""}>Завершить run</button>
       </div>
       <div class="auth-stack">
@@ -683,6 +685,7 @@
       input.type = input.type === "password" ? "text" : "password";
     });
     document.querySelector("#save-auth")?.addEventListener("click", savePanelAuth);
+    document.querySelector("#stop-on-log-error")?.addEventListener("change", (event) => { runtime.stopOnLogError = event.target.checked; });
     document.querySelectorAll("[data-advance]").forEach((button) => button.addEventListener("click", () => advanceTime(Number(button.dataset.advance))));
     document.querySelector("#advance-custom")?.addEventListener("click", () => {
       const value = Number(document.querySelector("#duration-value").value);
@@ -720,11 +723,15 @@
 
   async function advanceTime(seconds) {
     const runId = runtime.runId;
-    const buttons = document.querySelectorAll(".time-controls button");
-    buttons.forEach((button) => button.disabled = true);
+    const controls = document.querySelectorAll(".time-controls button, .time-controls input, .time-controls select");
+    controls.forEach((control) => control.disabled = true);
     try {
-      const result = await runApi(`/v2/runs/${runId}/time/advance`, { method: "POST", body: JSON.stringify({ request_id: requestId("advance"), duration_seconds: seconds }) });
-      toast("Время промотано", `${formatDuration(result.clock.applied_advance_seconds)} · ${formatCompact(result.processed_events)} событий`);
+      const payload = { request_id: requestId("advance"), duration_seconds: seconds };
+      if (runtime.stopOnLogError) payload.stop_when = { new_log_errors: 1 };
+      const result = await runApi(`/v2/runs/${runId}/time/advance`, { method: "POST", body: JSON.stringify(payload) });
+      const title = result.stop_reason === "log_error" ? "Остановлено на ошибке" : result.stop_reason === "run_completed" ? "Run завершён" : "Время промотано";
+      const detail = `${formatDuration(result.clock.applied_advance_seconds)} · ${formatCompact(result.processed_events)} событий${result.stop_reason === "log_error" ? " · откройте логи" : ""}`;
+      toast(title, detail, result.stop_reason === "log_error" ? "error" : "");
       if (isRunDashboard(runId)) await refreshDashboard();
     } catch (error) {
       toast(error.code, error.message, "error");

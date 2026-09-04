@@ -546,6 +546,12 @@ func (s *Server) handleAdvanceTime(writer http.ResponseWriter, request *http.Req
 		if input.DurationSeconds == nil || *input.DurationSeconds > int64((time.Duration(1<<63-1))/time.Second) {
 			return application.ApplicationResponse{}, application.ErrInvalidRequest
 		}
+		if input.StopWhen != nil {
+			if input.StopWhen.NewLogErrors == nil || *input.StopWhen.NewLogErrors != 1 {
+				return application.ApplicationResponse{}, application.ErrInvalidRequest
+			}
+			agentRequest.StopOnLogError = true
+		}
 		agentRequest.RequestedAdvance = time.Duration(*input.DurationSeconds) * time.Second
 		return s.runs.AdvanceTime(ctx, runID, agentRequest)
 	}, inputRequestID(&input), func(response application.ApplicationResponse) (any, error) {
@@ -555,7 +561,7 @@ func (s *Server) handleAdvanceTime(writer http.ResponseWriter, request *http.Req
 		}
 		return advanceTimeResponse{Clock: clockFrom(response.Clock), PreviousSimulationTime: view.PreviousSimulationTime,
 			RequestedDurationSeconds: int64(view.RequestedDuration / time.Second), ProcessedEvents: view.ProcessedEvents,
-			NewLogs: view.NewLogs, LogsCursor: stringPointer(view.LogsCursor)}, nil
+			NewLogs: view.NewLogs, LogsCursor: stringPointer(view.LogsCursor), StopReason: view.StopReason}, nil
 	})
 }
 

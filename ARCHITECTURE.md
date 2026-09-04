@@ -180,8 +180,11 @@ HTTP transport в `internal/httpapi` реализован тонким адап�
 - до agent request записывается audit `received`, после него — `completed`; API
   key удаляется из audit headers;
 - реальное время синхронизируется перед действием, а `/time/advance` применяет
-  один интервал `max(real_elapsed, requested_duration)`; отметка последнего
-  реального запроса хранится в SQLite и восстанавливается после рестарта;
+  один интервал `max(real_elapsed, requested_duration)`; опциональный
+  `stop_when.new_log_errors: 1` сначала детерминированно находит первую новую
+  ошибку публичного лога в этом интервале, затем атомарно применяет события до
+  всей её временной группы; отметка последнего реального запроса хранится в
+  SQLite и восстанавливается после рестарта;
 - `RunService` предоставляет application-операции для overview, metrics, logs,
   inbox, resources, operations, probes и time advance;
 - `Projection` строит ответы из state и records открытой сессии без повторного

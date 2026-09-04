@@ -85,7 +85,8 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			return nil, err
 		}
 		if command.RealElapsed < 0 || command.RequestedDuration < 0 ||
-			(command.RequestedDuration > 0 && command.RequestedDuration < MinExplicitAdvance) {
+			(command.RequestedDuration > 0 && command.RequestedDuration < MinExplicitAdvance) ||
+			(command.StopOnLogError && command.RequestedDuration < MinExplicitAdvance) {
 			return nil, fmt.Errorf("%w: explicit duration must be zero or at least %s; durations cannot be negative", ErrInvalidCommand, MinExplicitAdvance)
 		}
 		applied := max(command.RequestedDuration, command.RealElapsed)
@@ -97,6 +98,26 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			applied = remaining
 		}
 		to := state.Clock.CurrentTime.Add(applied)
+		if command.StopOnLogError && command.stopAt.IsZero() {
+			previewCommand := command
+			previewCommand.CommandID = ""
+			previewCommand.StopOnLogError = false
+			previewCommand.previewLogErrors = true
+			preview, err := Decide(runID, state, previewCommand)
+			if err != nil {
+				return nil, err
+			}
+			if stopAt, found := firstLogErrorTime(preview); found {
+				command.stopAt = stopAt
+			}
+		}
+		if !command.stopAt.IsZero() {
+			if !command.stopAt.After(state.Clock.CurrentTime) || command.stopAt.After(to) {
+				return nil, fmt.Errorf("%w: log-error stop time is outside the advance interval", ErrInvalidCommand)
+			}
+			to = command.stopAt
+			applied = to.Sub(state.Clock.CurrentTime)
+		}
 		working := cloneState(state)
 		result := make([]events.Event, 0)
 		appendEvents := func(items ...events.Event) error {
@@ -115,6 +136,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			RealElapsed:       command.RealElapsed,
 			RequestedDuration: command.RequestedDuration,
 			AppliedDuration:   applied,
+			StopOnLogError:    command.StopOnLogError,
 		}); err != nil {
 			return nil, err
 		}
@@ -226,7 +248,9 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		}
 		// Events inside the interval use the existing infrastructure. Server
 		// lifecycle transitions becoming ready are committed at its end.
-		for _, scheduled := range pendingScheduledEvents(state, to) {
+		pending := pendingScheduledEvents(state, to)
+		logErrorSeen := false
+		for index, scheduled := range pending {
 			if err := processAvailabilityBoundaries(scheduled.OccursAt); err != nil {
 				return nil, err
 			}
@@ -257,9 +281,16 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 					return nil, err
 				}
 				result = append(result, journey...)
+				if _, found := firstLogErrorTime(journey); found {
+					logErrorSeen = true
+				}
 			}
 			if err := recordBackendAvailability(scheduled.OccursAt); err != nil {
 				return nil, err
+			}
+			nextHasSameTime := index+1 < len(pending) && pending[index+1].OccursAt.Equal(scheduled.OccursAt)
+			if command.previewLogErrors && logErrorSeen && !nextHasSameTime {
+				return result, nil
 			}
 		}
 		if err := processAvailabilityBoundaries(to); err != nil {
@@ -620,9 +651,9 @@ func validPage(page model.PageType) bool {
 func commandReceipt(command Command) (model.CommandID, string) {
 	switch command := command.(type) {
 	case AdvanceTime:
-		return command.CommandID, timeCommandPayload(command.RealElapsed, command.RequestedDuration)
+		return command.CommandID, timeCommandPayload(command.RealElapsed, command.RequestedDuration, command.StopOnLogError)
 	case SynchronizeRealTime:
-		return command.CommandID, fmt.Sprintf("time:%d:0", command.RealElapsed)
+		return command.CommandID, timeCommandPayload(command.RealElapsed, 0, false)
 	case ProbePage:
 		return model.CommandID(command.RequestID), fmt.Sprintf("probe:%s:%s", command.Page, command.ProductID)
 	default:
@@ -636,11 +667,30 @@ func commandReceipt(command Command) (model.CommandID, string) {
 	}
 }
 
-func timeCommandPayload(realElapsed, requested time.Duration) string {
+func timeCommandPayload(realElapsed, requested time.Duration, stopOnLogError bool) string {
 	if requested > 0 {
+		if stopOnLogError {
+			return fmt.Sprintf("advance:%d:new-log-errors=1", requested)
+		}
 		return fmt.Sprintf("advance:%d", requested)
 	}
 	return fmt.Sprintf("time:%d:0", realElapsed)
+}
+
+func firstLogErrorTime(items []events.Event) (time.Time, bool) {
+	for _, item := range items {
+		switch event := item.(type) {
+		case events.PageRequestRejected:
+			if event.ErrorCode != "" {
+				return event.RejectedAt, true
+			}
+		case events.PageRequestCompleted:
+			if event.ErrorCode != "" {
+				return event.CompletedAt, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 func selectServer(state State, page model.PageType, required int64, at time.Time) (ServerState, int64, bool) {

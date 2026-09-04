@@ -32,6 +32,9 @@ type AdvanceTime struct {
 	CommandID         model.CommandID
 	RealElapsed       time.Duration
 	RequestedDuration time.Duration
+	StopOnLogError    bool
+	stopAt            time.Time
+	previewLogErrors  bool
 }
 
 func (AdvanceTime) commandType() string { return "AdvanceTime" }
