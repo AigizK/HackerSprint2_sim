@@ -33,6 +33,7 @@ type AdvanceTime struct {
 	RealElapsed       time.Duration
 	RequestedDuration time.Duration
 	StopOnLogError    bool
+	LogErrorCodes     []model.RequestFailureCode
 	stopAt            time.Time
 	previewLogErrors  bool
 }

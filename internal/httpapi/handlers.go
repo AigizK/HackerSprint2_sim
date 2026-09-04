@@ -551,6 +551,7 @@ func (s *Server) handleAdvanceTime(writer http.ResponseWriter, request *http.Req
 				return application.ApplicationResponse{}, application.ErrInvalidRequest
 			}
 			agentRequest.StopOnLogError = true
+			agentRequest.StopOnLogErrorCodes = input.StopWhen.ErrorCodes
 		}
 		agentRequest.RequestedAdvance = time.Duration(*input.DurationSeconds) * time.Second
 		return s.runs.AdvanceTime(ctx, runID, agentRequest)

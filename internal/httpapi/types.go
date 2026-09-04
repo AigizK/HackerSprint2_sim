@@ -246,7 +246,8 @@ type advanceTimeRequest struct {
 }
 
 type advanceTimeStopCondition struct {
-	NewLogErrors *int `json:"new_log_errors"`
+	NewLogErrors *int                       `json:"new_log_errors"`
+	ErrorCodes   []model.RequestFailureCode `json:"error_codes,omitempty"`
 }
 
 type advanceTimeResponse struct {

@@ -84,6 +84,11 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		if err := ensureRunning(state); err != nil {
 			return nil, err
 		}
+		normalizedCodes, validCodes := normalizeLogErrorCodes(command.LogErrorCodes)
+		if !validCodes || (len(command.LogErrorCodes) > 0 && !command.StopOnLogError && !command.previewLogErrors) {
+			return nil, fmt.Errorf("%w: invalid log error filter", ErrInvalidCommand)
+		}
+		command.LogErrorCodes = normalizedCodes
 		if command.RealElapsed < 0 || command.RequestedDuration < 0 ||
 			(command.RequestedDuration > 0 && command.RequestedDuration < MinExplicitAdvance) ||
 			(command.StopOnLogError && command.RequestedDuration < MinExplicitAdvance) {
@@ -107,7 +112,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			if err != nil {
 				return nil, err
 			}
-			if stopAt, found := firstLogErrorTime(preview); found {
+			if stopAt, found := firstLogErrorTime(preview, command.LogErrorCodes); found {
 				command.stopAt = stopAt
 			}
 		}
@@ -129,6 +134,10 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			}
 			return nil
 		}
+		eventLogErrorCodes := command.LogErrorCodes
+		if !command.StopOnLogError {
+			eventLogErrorCodes = nil
+		}
 		if err := appendEvents(events.TimeAdvanced{
 			CommandID:         command.CommandID,
 			From:              state.Clock.CurrentTime,
@@ -137,6 +146,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			RequestedDuration: command.RequestedDuration,
 			AppliedDuration:   applied,
 			StopOnLogError:    command.StopOnLogError,
+			LogErrorCodes:     eventLogErrorCodes,
 		}); err != nil {
 			return nil, err
 		}
@@ -260,6 +270,9 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			if err := appendEvents(scheduled.Event); err != nil {
 				return nil, err
 			}
+			if _, found := firstLogErrorTime([]events.Event{scheduled.Event}, command.LogErrorCodes); found {
+				logErrorSeen = true
+			}
 			if growth, ok := scheduled.Event.(events.DatabaseGrowthRequested); ok && working.Site.Status == model.SiteRunning {
 				if err := appendEvents(decidePendingGrowth(working, growth.GrowthID, growth.RequestedAt)...); err != nil {
 					return nil, err
@@ -281,7 +294,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 					return nil, err
 				}
 				result = append(result, journey...)
-				if _, found := firstLogErrorTime(journey); found {
+				if _, found := firstLogErrorTime(journey, command.LogErrorCodes); found {
 					logErrorSeen = true
 				}
 			}
@@ -651,9 +664,9 @@ func validPage(page model.PageType) bool {
 func commandReceipt(command Command) (model.CommandID, string) {
 	switch command := command.(type) {
 	case AdvanceTime:
-		return command.CommandID, timeCommandPayload(command.RealElapsed, command.RequestedDuration, command.StopOnLogError)
+		return command.CommandID, timeCommandPayload(command.RealElapsed, command.RequestedDuration, command.StopOnLogError, command.LogErrorCodes)
 	case SynchronizeRealTime:
-		return command.CommandID, timeCommandPayload(command.RealElapsed, 0, false)
+		return command.CommandID, timeCommandPayload(command.RealElapsed, 0, false, nil)
 	case ProbePage:
 		return model.CommandID(command.RequestID), fmt.Sprintf("probe:%s:%s", command.Page, command.ProductID)
 	default:
@@ -667,30 +680,81 @@ func commandReceipt(command Command) (model.CommandID, string) {
 	}
 }
 
-func timeCommandPayload(realElapsed, requested time.Duration, stopOnLogError bool) string {
+func AdvanceTimeCommandPayload(realElapsed, requested time.Duration, stopOnLogError bool, errorCodes []model.RequestFailureCode) string {
+	return timeCommandPayload(realElapsed, requested, stopOnLogError, errorCodes)
+}
+
+func timeCommandPayload(realElapsed, requested time.Duration, stopOnLogError bool, errorCodes []model.RequestFailureCode) string {
 	if requested > 0 {
 		if stopOnLogError {
-			return fmt.Sprintf("advance:%d:new-log-errors=1", requested)
+			payload := fmt.Sprintf("advance:%d:new-log-errors=1", requested)
+			if normalized, valid := normalizeLogErrorCodes(errorCodes); valid && len(normalized) > 0 {
+				values := make([]string, len(normalized))
+				for index, code := range normalized {
+					values[index] = string(code)
+				}
+				payload += ":error-codes=" + strings.Join(values, ",")
+			}
+			return payload
 		}
 		return fmt.Sprintf("advance:%d", requested)
 	}
 	return fmt.Sprintf("time:%d:0", realElapsed)
 }
 
-func firstLogErrorTime(items []events.Event) (time.Time, bool) {
+func firstLogErrorTime(items []events.Event, errorCodes []model.RequestFailureCode) (time.Time, bool) {
 	for _, item := range items {
 		switch event := item.(type) {
 		case events.PageRequestRejected:
-			if event.ErrorCode != "" {
+			if logErrorCodeMatches(event.ErrorCode, errorCodes) {
 				return event.RejectedAt, true
 			}
 		case events.PageRequestCompleted:
-			if event.ErrorCode != "" {
+			if logErrorCodeMatches(event.ErrorCode, errorCodes) {
 				return event.CompletedAt, true
 			}
 		}
 	}
 	return time.Time{}, false
+}
+
+func normalizeLogErrorCodes(codes []model.RequestFailureCode) ([]model.RequestFailureCode, bool) {
+	if len(codes) == 0 {
+		return nil, true
+	}
+	normalized := append([]model.RequestFailureCode(nil), codes...)
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
+	for index, code := range normalized {
+		if !validRequestFailureCode(code) || index > 0 && code == normalized[index-1] {
+			return nil, false
+		}
+	}
+	return normalized, true
+}
+
+func logErrorCodeMatches(code model.RequestFailureCode, filters []model.RequestFailureCode) bool {
+	if code == "" {
+		return false
+	}
+	if len(filters) == 0 {
+		return true
+	}
+	for _, filter := range filters {
+		if code == filter {
+			return true
+		}
+	}
+	return false
+}
+
+func validRequestFailureCode(code model.RequestFailureCode) bool {
+	switch code {
+	case model.FailureServerCapacityExceeded, model.FailureDBConnectionLimit, model.FailureDiskFull,
+		model.FailureSiteUnavailable, model.FailureDatabaseUnavailable, model.FailureFirewallDenied:
+		return true
+	default:
+		return false
+	}
 }
 
 func selectServer(state State, page model.PageType, required int64, at time.Time) (ServerState, int64, bool) {

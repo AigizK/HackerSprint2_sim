@@ -1,6 +1,7 @@
 package playerui
 
 import (
+	"compress/gzip"
 	"context"
 	"embed"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/application"
@@ -46,6 +48,8 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 type runSummaryResponse struct {
 	RunID             string    `json:"run_id"`
+	AgentID           string    `json:"agent_id"`
+	AgentVersion      string    `json:"agent_version"`
 	Seed              int64     `json:"seed"`
 	Status            string    `json:"status"`
 	SiteStatus        string    `json:"site_status"`
@@ -77,7 +81,7 @@ func (s *Server) handleRuns(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
-	summaries, err := s.query.Runs(request.Context(), "human-ui", limit, offset)
+	summaries, err := s.query.Runs(request.Context(), "", limit, offset)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, application.ErrInvalidRequest) {
@@ -89,7 +93,8 @@ func (s *Server) handleRuns(writer http.ResponseWriter, request *http.Request) {
 	result := runsResponse{Runs: make([]runSummaryResponse, 0, len(summaries))}
 	for _, summary := range summaries {
 		result.Runs = append(result.Runs, runSummaryResponse{
-			RunID: summary.Run.RunID, Seed: summary.Seed, Status: summary.Overview.RunStatus,
+			RunID: summary.Run.RunID, AgentID: summary.Run.AgentID, AgentVersion: summary.Run.AgentVersion,
+			Seed: summary.Seed, Status: summary.Overview.RunStatus,
 			SiteStatus: summary.Overview.SiteStatus, SimulationTime: summary.Overview.SimulationTime,
 			SimulationEndsAt: summary.Overview.SimulationEndsAt, CreatedAt: summary.Run.CreatedAt,
 			TotalCostMinor: summary.Overview.Costs.TotalCostMinor, Currency: summary.Overview.Costs.Currency,
@@ -121,8 +126,53 @@ func (s *Server) handleApp(writer http.ResponseWriter, request *http.Request) {
 func cacheAssets(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "public, max-age=300")
-		next.ServeHTTP(writer, request)
+		writer.Header().Add("Vary", "Accept-Encoding")
+		if request.Method != http.MethodGet || request.Header.Get("Range") != "" || !acceptsGzip(request.Header.Get("Accept-Encoding")) {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Encoding", "gzip")
+		compressor := gzip.NewWriter(writer)
+		defer compressor.Close()
+		next.ServeHTTP(&gzipResponseWriter{ResponseWriter: writer, compressor: compressor}, request)
 	})
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	compressor *gzip.Writer
+}
+
+func (w *gzipResponseWriter) WriteHeader(statusCode int) {
+	w.Header().Del("Accept-Ranges")
+	w.Header().Del("Content-Length")
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *gzipResponseWriter) Write(contents []byte) (int, error) {
+	w.Header().Del("Content-Length")
+	return w.compressor.Write(contents)
+}
+
+func acceptsGzip(header string) bool {
+	for _, item := range strings.Split(header, ",") {
+		parts := strings.Split(item, ";")
+		if !strings.EqualFold(strings.TrimSpace(parts[0]), "gzip") {
+			continue
+		}
+		quality := 1.0
+		for _, parameter := range parts[1:] {
+			key, value, found := strings.Cut(strings.TrimSpace(parameter), "=")
+			if !found || !strings.EqualFold(strings.TrimSpace(key), "q") {
+				continue
+			}
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil {
+				quality = parsed
+			}
+		}
+		return quality > 0
+	}
+	return false
 }
 
 func positiveInt(value string, fallback int) (int, error) {

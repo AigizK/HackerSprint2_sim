@@ -1,6 +1,9 @@
 package spec_test
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestAdvanceTimeOpenAPIHasFirstNewLogErrorStopCondition(t *testing.T) {
 	document := loadOpenAPI(t)
@@ -16,6 +19,13 @@ func TestAdvanceTimeOpenAPIHasFirstNewLogErrorStopCondition(t *testing.T) {
 	assertRequiredFields(t, stopWhen, []string{"new_log_errors"})
 	if objectField(t, objectField(t, stopWhen, "properties"), "new_log_errors")["const"] != 1 {
 		t.Fatal("the first version must stop on exactly one new log error")
+	}
+	errorCodes := objectField(t, objectField(t, stopWhen, "properties"), "error_codes")
+	if errorCodes["type"] != "array" || errorCodes["minItems"] != 1 || errorCodes["uniqueItems"] != true {
+		t.Fatalf("error_codes must be a non-empty set: %#v", errorCodes)
+	}
+	if !reflect.DeepEqual(objectField(t, errorCodes, "items"), map[string]any{"$ref": "#/components/schemas/RequestFailureCode"}) {
+		t.Fatalf("error_codes items = %#v", objectField(t, errorCodes, "items"))
 	}
 
 	response := objectField(t, schemas, "AdvanceTimeResponse")

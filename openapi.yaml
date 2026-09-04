@@ -693,10 +693,13 @@ paths:
         `duration_seconds` должен быть не меньше 300. Фактическое продвижение равно
         `max(real_elapsed_since_previous_request, duration_seconds)`, если раньше не
         сработал `stop_when`. Условие `new_log_errors: 1` останавливает прокрутку на
-        временной метке первой новой записи публичного лога с непустым `error`.
-        Существовавшие до запроса ошибки не учитываются. События с одной временной
-        меткой обрабатываются атомарно. Повтор с тем же `request_id` не продвигает
-        время второй раз; `stop_when` входит в идемпотентный payload.
+        временной метке первой новой подходящей записи публичного лога с непустым
+        `error`. Необязательный `error_codes` ограничивает условие перечисленными
+        точными кодами с OR-семантикой; без него подходит любая ошибка.
+        Существовавшие до запроса ошибки и новые ошибки других типов не учитываются.
+        События с одной временной меткой обрабатываются атомарно. Повтор с тем же
+        `request_id` не продвигает время второй раз; нормализованный `stop_when`
+        входит в идемпотентный payload.
       parameters:
         - $ref: '#/components/parameters/RunId'
       requestBody:
@@ -710,6 +713,7 @@ paths:
               duration_seconds: 3600
               stop_when:
                 new_log_errors: 1
+                error_codes: [SERVER_CAPACITY_EXCEEDED, DB_CONNECTION_LIMIT_EXCEEDED]
       responses:
         '200':
           description: Время продвинуто, наступившие события обработаны
@@ -1892,6 +1896,16 @@ components:
           type: integer
           const: 1
           description: Остановиться на первой новой записи публичного лога с непустым error
+        error_codes:
+          type: array
+          minItems: 1
+          maxItems: 6
+          uniqueItems: true
+          description: |
+            Необязательный набор точных кодов. Коды соединяются через OR; если
+            поле отсутствует, условию соответствует любая инфраструктурная ошибка.
+          items:
+            $ref: '#/components/schemas/RequestFailureCode'
 
     AdvanceTimeResponse:
       type: object

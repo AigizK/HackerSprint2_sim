@@ -199,6 +199,10 @@ func (s *State) Apply(event events.Event) error {
 			(event.StopOnLogError && event.RequestedDuration < MinExplicitAdvance) {
 			return fmt.Errorf("%w: invalid time durations", ErrInvalidEvent)
 		}
+		normalizedCodes, validCodes := normalizeLogErrorCodes(event.LogErrorCodes)
+		if !validCodes || len(event.LogErrorCodes) > 0 && !event.StopOnLogError || !reflect.DeepEqual(normalizedCodes, event.LogErrorCodes) {
+			return fmt.Errorf("%w: invalid log error filter", ErrInvalidEvent)
+		}
 		expectedApplied := max(event.RealElapsed, event.RequestedDuration)
 		if remaining := s.Clock.EndsAt.Sub(event.From); expectedApplied > remaining {
 			expectedApplied = remaining
@@ -208,7 +212,7 @@ func (s *State) Apply(event events.Event) error {
 			return fmt.Errorf("%w: applied duration does not follow max(real, requested)", ErrInvalidEvent)
 		}
 		if event.CommandID != "" {
-			if err := s.recordCommand(event.CommandID, timeCommandPayload(event.RealElapsed, event.RequestedDuration, event.StopOnLogError)); err != nil {
+			if err := s.recordCommand(event.CommandID, timeCommandPayload(event.RealElapsed, event.RequestedDuration, event.StopOnLogError, event.LogErrorCodes)); err != nil {
 				return err
 			}
 		}

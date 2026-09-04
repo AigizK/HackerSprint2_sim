@@ -220,7 +220,7 @@
       </aside>
     </section>
     <section class="history-section">
-      <div class="section-heading"><div><h2>Последние запуски</h2><p>Ручные runs этого интерфейса.</p></div><a href="/ui/history" class="button secondary compact" data-link>Вся история</a></div>
+      <div class="section-heading"><div><h2>Последние запуски</h2><p>Все runs симулятора.</p></div><a href="/ui/history" class="button secondary compact" data-link>Вся история</a></div>
       ${historyTable(history.runs.slice(0, 8))}
     </section>`;
     document.querySelector("#random-seed").addEventListener("click", () => { document.querySelector("#seed").value = randomSeed(); });
@@ -281,6 +281,7 @@
       const uptime = run.uptime_ratio == null ? "—" : percent(run.uptime_ratio, 2);
       return `<tr>
         <td><div class="primary-cell mono truncate" title="${escapeHTML(run.run_id)}">${escapeHTML(run.run_id)}</div><small class="muted">seed ${run.seed}</small></td>
+        <td><div class="primary-cell mono">${escapeHTML(run.agent_id || "—")}</div><small class="muted">${run.agent_version ? `v${escapeHTML(run.agent_version)}` : "—"}</small></td>
         <td><span class="badge ${statusClass(run.status)}">${escapeHTML(run.status)}</span></td>
         <td><span class="badge ${statusClass(run.site_status)}">${escapeHTML(run.site_status || "unknown")}</span></td>
         <td class="mono nowrap">${formatDateTime(run.simulation_time)}</td>
@@ -290,7 +291,7 @@
         <td>${broken ? `<span class="log-code">${escapeHTML(broken)}</span>` : `<a class="button secondary compact" href="/ui/runs/${run.run_id}" data-link>${run.status === "completed" ? "Открыть отчёт" : "Продолжить"}</a>`}</td>
       </tr>`;
     }).join("");
-    return `<div class="panel table-scroll"><table class="data-table"><thead><tr><th>Run</th><th>Состояние</th><th>Сервис</th><th>Сим. время</th><th>Uptime</th><th>Стоимость</th>${full ? "<th>События</th>" : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="panel table-scroll"><table class="data-table"><thead><tr><th>Run</th><th>Агент</th><th>Состояние</th><th>Сервис</th><th>Сим. время</th><th>Uptime</th><th>Стоимость</th>${full ? "<th>События</th>" : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function authKey(runId) { return `uptick.auth.${runId}`; }

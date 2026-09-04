@@ -33,6 +33,7 @@ type AgentRequest struct {
 	Body                   []byte
 	RequestedAdvance       time.Duration
 	StopOnLogError         bool
+	StopOnLogErrorCodes    []model.RequestFailureCode
 }
 
 type ClockEnvelope struct {
@@ -177,13 +178,13 @@ func (m *RunManager) Handle(ctx context.Context, runID string, request AgentRequ
 		before := state.Clock.CurrentTime
 		decided, execErr := managed.session.Execute(ctx, simulation.AdvanceTime{
 			CommandID: commandID, RealElapsed: realElapsed, RequestedDuration: requested,
-			StopOnLogError: request.StopOnLogError,
+			StopOnLogError: request.StopOnLogError, LogErrorCodes: request.StopOnLogErrorCodes,
 		})
 		if execErr != nil {
 			return ApplicationResponse{}, execErr
 		}
 		processedEvents = len(decided)
-		newLogErrors := countLogErrors(decided)
+		newLogErrors := countLogErrors(decided, request.StopOnLogErrorCodes)
 		state = managed.session.State()
 		applied = state.Clock.CurrentTime.Sub(before)
 		requestLogErrors = newLogErrors
@@ -208,21 +209,36 @@ func (m *RunManager) Handle(ctx context.Context, runID string, request AgentRequ
 	return response, err
 }
 
-func countLogErrors(items []events.Event) int {
+func countLogErrors(items []events.Event, errorCodes []model.RequestFailureCode) int {
 	count := 0
 	for _, item := range items {
 		switch event := item.(type) {
 		case events.PageRequestRejected:
-			if event.ErrorCode != "" {
+			if matchesLogErrorCode(event.ErrorCode, errorCodes) {
 				count++
 			}
 		case events.PageRequestCompleted:
-			if event.ErrorCode != "" {
+			if matchesLogErrorCode(event.ErrorCode, errorCodes) {
 				count++
 			}
 		}
 	}
 	return count
+}
+
+func matchesLogErrorCode(code model.RequestFailureCode, filters []model.RequestFailureCode) bool {
+	if code == "" {
+		return false
+	}
+	if len(filters) == 0 {
+		return true
+	}
+	for _, filter := range filters {
+		if code == filter {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *RunManager) open(ctx context.Context, runID string) (*managedRun, error) {

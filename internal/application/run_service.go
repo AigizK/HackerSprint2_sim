@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/controlauth"
@@ -220,10 +221,14 @@ func (s *RunService) AdvanceTime(ctx context.Context, runID string, request Agen
 	if request.RequestedAdvance < simulation.MinExplicitAdvance {
 		return ApplicationResponse{}, ErrMinimumAdvance
 	}
-	request.ExpectedCommandPayload = fmt.Sprintf("advance:%d", request.RequestedAdvance)
-	if request.StopOnLogError {
-		request.ExpectedCommandPayload += ":new-log-errors=1"
+	normalizedCodes, valid := normalizeLogErrorCodes(request.StopOnLogErrorCodes)
+	if !valid || (!request.StopOnLogError && request.StopOnLogErrorCodes != nil) {
+		return ApplicationResponse{}, ErrInvalidRequest
 	}
+	request.StopOnLogErrorCodes = normalizedCodes
+	request.ExpectedCommandPayload = simulation.AdvanceTimeCommandPayload(
+		0, request.RequestedAdvance, request.StopOnLogError, request.StopOnLogErrorCodes,
+	)
 	return s.manager.Handle(ctx, runID, request, func(_ context.Context, run *RunContext) (ApplicationResponse, error) {
 		stopReason := "duration_elapsed"
 		if run.State.Status != simulation.RunRunning {
@@ -236,6 +241,23 @@ func (s *RunService) AdvanceTime(ctx context.Context, runID string, request Agen
 			ProcessedEvents: run.ProcessedEvents, NewLogs: run.NewLogs, LogsCursor: run.LogsCursor, StopReason: stopReason,
 		}}, nil
 	})
+}
+
+func normalizeLogErrorCodes(codes []model.RequestFailureCode) ([]model.RequestFailureCode, bool) {
+	if codes == nil {
+		return nil, true
+	}
+	if len(codes) == 0 {
+		return nil, false
+	}
+	normalized := append([]model.RequestFailureCode(nil), codes...)
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
+	for index, code := range normalized {
+		if !validOptionalRequestFailure(code) || code == "" || index > 0 && code == normalized[index-1] {
+			return nil, false
+		}
+	}
+	return normalized, true
 }
 
 func (s *RunService) observe(ctx context.Context, runID string, request AgentRequest, needsRecords bool, project func(simulation.Projection) any) (ApplicationResponse, error) {

@@ -41,6 +41,52 @@ func TestAdvanceTimeStopsAtFirstNewLogError(t *testing.T) {
 	}
 }
 
+func TestAdvanceTimeStopsOnlyOnSelectedLogErrorCodes(t *testing.T) {
+	api, closeStorage, startsAt := newTimeAdvanceAlertSpecServer(t)
+	defer closeStorage()
+	runID := startTimeAdvanceSpecRun(t, api, -74, "start-filtered-alert-stop")
+
+	result := callJSON(t, api, http.MethodPost, "/v2/runs/"+runID+"/time/advance", map[string]any{
+		"request_id":       "wait-for-db-limit",
+		"duration_seconds": 30 * 60,
+		"stop_when": map[string]any{
+			"new_log_errors": 1,
+			"error_codes":    []string{"DB_CONNECTION_LIMIT_EXCEEDED"},
+		},
+	}, http.StatusOK)
+
+	if stringField(t, result, "stop_reason") != "log_error" {
+		t.Fatalf("advance result = %#v", result)
+	}
+	assertSimulationTime(t, result, startsAt.Add(10*time.Minute))
+	if numberField(t, result, "new_logs") != 2 {
+		t.Fatalf("new_logs = %#v, want the skipped and triggering errors", result["new_logs"])
+	}
+}
+
+func TestAdvanceTimeErrorCodeFilterUsesAnySelectedCode(t *testing.T) {
+	api, closeStorage, startsAt := newTimeAdvanceAlertSpecServer(t)
+	defer closeStorage()
+	runID := startTimeAdvanceSpecRun(t, api, -74, "start-multi-alert-stop")
+
+	result := callJSON(t, api, http.MethodPost, "/v2/runs/"+runID+"/time/advance", map[string]any{
+		"request_id":       "wait-for-disk-or-db-limit",
+		"duration_seconds": 30 * 60,
+		"stop_when": map[string]any{
+			"new_log_errors": 1,
+			"error_codes":    []string{"DISK_FULL", "DB_CONNECTION_LIMIT_EXCEEDED"},
+		},
+	}, http.StatusOK)
+
+	if stringField(t, result, "stop_reason") != "log_error" {
+		t.Fatalf("advance result = %#v", result)
+	}
+	assertSimulationTime(t, result, startsAt.Add(5*time.Minute))
+	if numberField(t, result, "new_logs") != 1 {
+		t.Fatalf("new_logs = %#v, want the first matching error", result["new_logs"])
+	}
+}
+
 func TestAdvanceTimeWithNoNewLogErrorReachesDurationLimit(t *testing.T) {
 	api, closeStorage, _ := newTimeAdvanceAlertSpecServer(t)
 	defer closeStorage()
@@ -137,6 +183,35 @@ func TestAdvanceTimeRejectsUnsupportedLogErrorThreshold(t *testing.T) {
 	}
 }
 
+func TestAdvanceTimeRejectsInvalidLogErrorCodeFilters(t *testing.T) {
+	tests := []struct {
+		name  string
+		codes []string
+	}{
+		{name: "empty", codes: []string{}},
+		{name: "unknown", codes: []string{"NOT_A_REAL_ERROR"}},
+		{name: "duplicate", codes: []string{"DISK_FULL", "DISK_FULL"}},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api, closeStorage, _ := newTimeAdvanceAlertSpecServer(t)
+			defer closeStorage()
+			runID := startTimeAdvanceSpecRun(t, api, -72, "start-invalid-filter-"+test.name)
+			result := callJSON(t, api, http.MethodPost, "/v2/runs/"+runID+"/time/advance", map[string]any{
+				"request_id":       "invalid-filter-" + test.name,
+				"duration_seconds": 30 * 60,
+				"stop_when": map[string]any{
+					"new_log_errors": 1,
+					"error_codes":    test.codes,
+				},
+			}, http.StatusBadRequest)
+			if stringField(t, result, "error") != "INVALID_REQUEST" {
+				t.Fatalf("case %d response = %#v", index, result)
+			}
+		})
+	}
+}
+
 func TestAdvanceTimeStopConditionIsPartOfIdempotentPayload(t *testing.T) {
 	api, closeStorage, _ := newTimeAdvanceAlertSpecServer(t)
 	defer closeStorage()
@@ -151,6 +226,39 @@ func TestAdvanceTimeStopConditionIsPartOfIdempotentPayload(t *testing.T) {
 	conflict := callJSON(t, api, http.MethodPost, base+"/time/advance", map[string]any{
 		"request_id": "same-advance-id", "duration_seconds": 5 * 60,
 	}, http.StatusConflict)
+	if stringField(t, conflict, "error") != "IDEMPOTENCY_CONFLICT" {
+		t.Fatalf("conflict = %#v", conflict)
+	}
+}
+
+func TestAdvanceTimeErrorCodeFilterHasCanonicalIdempotency(t *testing.T) {
+	api, closeStorage, _ := newTimeAdvanceAlertSpecServer(t)
+	defer closeStorage()
+	runID := startTimeAdvanceSpecRun(t, api, -72, "start-filter-idempotency")
+	base := "/v2/runs/" + runID
+
+	first := map[string]any{
+		"request_id":       "same-filtered-advance-id",
+		"duration_seconds": 5 * 60,
+		"stop_when": map[string]any{
+			"new_log_errors": 1,
+			"error_codes":    []string{"DISK_FULL", "DB_CONNECTION_LIMIT_EXCEEDED"},
+		},
+	}
+	callJSON(t, api, http.MethodPost, base+"/time/advance", first, http.StatusOK)
+
+	// A filter is a set: changing only its order must remain idempotent.
+	first["stop_when"] = map[string]any{
+		"new_log_errors": 1,
+		"error_codes":    []string{"DB_CONNECTION_LIMIT_EXCEEDED", "DISK_FULL"},
+	}
+	callJSON(t, api, http.MethodPost, base+"/time/advance", first, http.StatusOK)
+
+	first["stop_when"] = map[string]any{
+		"new_log_errors": 1,
+		"error_codes":    []string{"DISK_FULL"},
+	}
+	conflict := callJSON(t, api, http.MethodPost, base+"/time/advance", first, http.StatusConflict)
 	if stringField(t, conflict, "error") != "IDEMPOTENCY_CONFLICT" {
 		t.Fatalf("conflict = %#v", conflict)
 	}
@@ -192,9 +300,30 @@ func newTimeAdvanceAlertSpecServer(t *testing.T) (*Server, func(), time.Time) {
 		_ = storage.Close()
 		t.Fatal(err)
 	}
+	filteredErrors := events.EventSchedule{}
+	filteredErrors = append(filteredErrors, scheduledLogError(1, startsAt.Add(5*time.Minute), "disk-full", model.FailureDiskFull)...)
+	filteredErrors = append(filteredErrors, scheduledLogError(3, startsAt.Add(10*time.Minute), "db-limit", model.FailureDBConnectionLimit)...)
+	if _, err := application.RegisterManualWorld(ctx, storage.Catalog, application.ManualWorldInput{
+		Seed: -74, StartsAt: startsAt, EndsAt: startsAt.Add(time.Hour), Events: filteredErrors,
+	}); err != nil {
+		_ = storage.Close()
+		t.Fatal(err)
+	}
 	manager := application.NewRunManager(storage.Catalog, storage.Journal, storage.Journal, 2)
 	api := New(application.NewStartRunService(storage.Catalog, storage.Journal, nil, storage.Journal), application.NewRunService(manager, storage.Catalog))
 	return api, func() { _ = storage.Close() }, startsAt
+}
+
+func scheduledLogError(sequence uint64, at time.Time, requestID model.RequestID, code model.RequestFailureCode) events.EventSchedule {
+	return events.EventSchedule{
+		{Sequence: sequence, OccursAt: at, Event: events.PageRequestStarted{
+			RequestID: requestID, Source: model.RequestSourceVisitor, VisitorID: model.VisitorID("visitor-" + requestID),
+			Page: model.PageProductList, StartedAt: at,
+		}},
+		{Sequence: sequence + 1, OccursAt: at, Event: events.PageRequestRejected{
+			RequestID: requestID, StatusCode: 500, ErrorCode: code, Message: "scheduled failure", RejectedAt: at,
+		}},
+	}
 }
 
 func startTimeAdvanceSpecRun(t *testing.T, api *Server, seed int64, requestID string) string {
