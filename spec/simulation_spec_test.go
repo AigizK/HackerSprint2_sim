@@ -43,95 +43,28 @@ func TestProductAddition(t *testing.T) {
 	)
 
 	s.When(
-		s.Product.Add("coffee-1", "Coffee machine", 12_990, 850_000, 200_000),
+		s.Product.Add("coffee-1", "Coffee machine", 12_990, 850_000),
 	)
 
 	s.Then(
 		s.Events.Exactly(events.ProductAdded{
-			ProductID:              "coffee-1",
-			Name:                   "Coffee machine",
-			PriceMinor:             12_990,
-			ViewProbabilityPPM:     850_000,
-			PurchaseProbabilityPPM: 200_000,
-			AddedAt:                worldStartsAt,
+			ProductID:          "coffee-1",
+			Name:               "Coffee machine",
+			PriceMinor:         12_990,
+			ViewProbabilityPPM: 850_000,
+			AddedAt:            worldStartsAt,
 		}),
 		s.State.HasProduct(simulation.ProductState{
-			ID:                     "coffee-1",
-			Name:                   "Coffee machine",
-			PriceMinor:             12_990,
-			ViewProbabilityPPM:     850_000,
-			PurchaseProbabilityPPM: 200_000,
-			AddedAt:                worldStartsAt,
+			ID:                 "coffee-1",
+			Name:               "Coffee machine",
+			Manufacturer:       "Unknown",
+			PriceMinor:         12_990,
+			Version:            1,
+			ViewProbabilityPPM: 850_000,
+			AddedAt:            worldStartsAt,
+			UpdatedAt:          worldStartsAt,
 		}),
 		s.State.Version(2),
-	)
-}
-
-func TestProductPurchase(t *testing.T) {
-	s := spec.New(t, "run-purchase-product")
-	endsAt := worldStartsAt.Add(24 * time.Hour)
-
-	s.Given(
-		s.World.Created(42, worldStartsAt, endsAt),
-		s.Product.Added("coffee-1", "Coffee machine", 12_990, 850_000, 200_000),
-	)
-
-	s.When(
-		s.Product.Purchase("purchase-1", "coffee-1"),
-	)
-
-	s.Then(
-		s.Events.Exactly(events.ProductPurchased{
-			PurchaseID:  "purchase-1",
-			ProductID:   "coffee-1",
-			PriceMinor:  12_990,
-			PurchasedAt: worldStartsAt,
-		}),
-		s.State.Economy(12_990, 1),
-		s.State.Version(3),
-	)
-}
-
-func TestUnknownProductCannotBePurchased(t *testing.T) {
-	s := spec.New(t, "run-missing-product")
-
-	s.Given(
-		s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)),
-	)
-
-	s.WhenFails(
-		simulation.ErrProductNotFound,
-		s.Product.Purchase("purchase-1", "missing-product"),
-	)
-
-	s.Then(
-		s.Events.None(),
-		s.State.Economy(0, 0),
-		s.State.Version(1),
-	)
-}
-
-func TestPurchaseIDCannotBeAppliedTwice(t *testing.T) {
-	s := spec.New(t, "run-duplicate-purchase")
-
-	s.Given(
-		s.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)),
-		s.Product.Added("coffee-1", "Coffee machine", 12_990, 850_000, 200_000),
-	)
-
-	s.When(
-		s.Product.Purchase("purchase-1", "coffee-1"),
-	)
-
-	s.WhenFails(
-		simulation.ErrPurchaseAlreadyExists,
-		s.Product.Purchase("purchase-1", "coffee-1"),
-	)
-
-	s.Then(
-		s.Events.None(),
-		s.State.Economy(12_990, 1),
-		s.State.Version(3),
 	)
 }
 

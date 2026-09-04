@@ -39,19 +39,18 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("POST /v1/start", s.handleStartRun)
-	s.mux.HandleFunc("GET /v1/runs/{run_id}/overview", s.handleOverview)
-	s.mux.HandleFunc("GET /v1/runs/{run_id}/metrics", s.handleMetrics)
-	s.mux.HandleFunc("GET /v1/runs/{run_id}/logs", s.handleLogs)
-	s.mux.HandleFunc("GET /v1/runs/{run_id}/resources", s.handleResources)
-	s.mux.HandleFunc("PUT /v1/runs/{run_id}/resources/backend", s.handleScaleBackend)
-	s.mux.HandleFunc("POST /v1/runs/{run_id}/fixes", s.handleApplyFix)
-	s.mux.HandleFunc("GET /v1/runs/{run_id}/deployments", s.handleDeployments)
-	s.mux.HandleFunc("POST /v1/runs/{run_id}/deployments", s.handleStartDeployment)
-	s.mux.HandleFunc("GET /v1/runs/{run_id}/operations/{operation_id}", s.handleOperation)
-	s.mux.HandleFunc("POST /v1/runs/{run_id}/probes", s.handleProbe)
-	s.mux.HandleFunc("GET /v1/runs/{run_id}/economy", s.handleEconomy)
-	s.mux.HandleFunc("POST /v1/runs/{run_id}/time/advance", s.handleAdvanceTime)
+	s.mux.HandleFunc("POST /v2/start", s.handleStartRun)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/overview", s.handleOverview)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/metrics", s.handleMetrics)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/logs", s.handleLogs)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/resources", s.handleResources)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/operations/{operation_id}", s.handleOperation)
+	s.mux.HandleFunc("POST /v2/runs/{run_id}/probes", s.handleProbe)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/inbox", s.handleInbox)
+	s.mux.HandleFunc("POST /v2/runs/{run_id}/time/advance", s.handleAdvanceTime)
+	s.mux.HandleFunc("POST /v2/runs/{run_id}/control/commands", s.handleControlCommand)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/control/commands", s.handleControlCommands)
+	s.mux.HandleFunc("GET /v2/runs/{run_id}/credentials/{credential_id}", s.handleServerCredential)
 }
 
 func (s *Server) runID(request *http.Request) (string, error) {
@@ -79,15 +78,22 @@ func decodeRequestBody(writer http.ResponseWriter, request *http.Request, target
 	if err != nil || len(bytes.TrimSpace(body)) == 0 {
 		return nil, application.ErrInvalidRequest
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return nil, application.ErrInvalidRequest
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := decodeStrictJSON(body, target); err != nil {
 		return nil, application.ErrInvalidRequest
 	}
 	return body, nil
+}
+
+func decodeStrictJSON(body []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return application.ErrInvalidRequest
+	}
+	return nil
 }
 
 func parseOptionalTime(value string) (time.Time, error) {
@@ -169,7 +175,7 @@ func requireValue[T any](response application.ApplicationResponse) (T, error) {
 
 func validPage(value string) bool {
 	page := model.PageType(value)
-	return page == model.PageProductList || page == model.PageProduct || page == model.PagePurchase
+	return page == model.PageProductList || page == model.PageProduct
 }
 
 func metricQuery(request *http.Request) (simulation.MetricsQuery, error) {
@@ -216,6 +222,23 @@ func logsQuery(request *http.Request) (simulation.LogsQuery, error) {
 	if page != "" && !validPage(string(page)) {
 		return simulation.LogsQuery{}, application.ErrInvalidRequest
 	}
+	var hasError *bool
+	if value := query.Get("has_error"); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return simulation.LogsQuery{}, application.ErrInvalidRequest
+		}
+		hasError = &parsed
+	}
 	return simulation.LogsQuery{From: from, To: to, Page: page, StatusCode: status,
+		HasError: hasError, ErrorCode: model.RequestFailureCode(query.Get("error")),
 		Cursor: query.Get("cursor"), Limit: limit}, nil
+}
+
+func inboxQuery(request *http.Request) (simulation.InboxQuery, error) {
+	limit, err := parseOptionalInt(request.URL.Query().Get("limit"), 100)
+	if err != nil || limit < 1 || limit > 1000 {
+		return simulation.InboxQuery{}, application.ErrInvalidRequest
+	}
+	return simulation.InboxQuery{Cursor: request.URL.Query().Get("cursor"), Limit: limit}, nil
 }

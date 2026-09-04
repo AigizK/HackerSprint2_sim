@@ -24,7 +24,7 @@ func newProfileScenario(t *testing.T) *profileScenario { return &profileScenario
 func (s *profileScenario) GivenDefaultProfile() {
 	s.t.Helper()
 	_, file, _, _ := runtime.Caller(0)
-	s.path = filepath.Join(filepath.Dir(file), "..", "config", "world-generation.v1.yaml")
+	s.path = filepath.Join(filepath.Dir(file), "..", "config", "world-generation.v2.yaml")
 }
 
 func (s *profileScenario) GivenProfile(content string) { s.content = content }
@@ -43,23 +43,23 @@ func (s *profileScenario) ThenProfileIsValid() {
 	if s.err != nil {
 		s.t.Fatalf("profile is invalid: %v", s.err)
 	}
-	if s.profile.Version != "world-generation.v1" {
+	if s.profile.Version != "world-generation.v2" {
 		s.t.Fatalf("version = %q", s.profile.Version)
 	}
 	if len(s.profile.Traffic.HourlyMultipliers) != 24 {
 		s.t.Fatalf("hour multipliers = %d", len(s.profile.Traffic.HourlyMultipliers))
 	}
-	if !s.profile.Economy.StopRunWhenBalanceIsNegative {
-		s.t.Fatal("negative balance does not stop the run")
-	}
-	if !s.profile.DDoS.Enabled || len(s.profile.DDoS.Kinds) != 3 {
+	if !s.profile.DDoS.Enabled || len(s.profile.DDoS.Kinds) != 2 {
 		s.t.Fatal("DDoS strategies are not configured")
 	}
-	if s.profile.Deployments.FutureDeploymentDurationReduction.Max == 0 {
-		s.t.Fatal("future deployment acceleration is not configured")
+	if !s.profile.Clock.RandomStartWeek || s.profile.Clock.SimulationDurationDays != 7 {
+		s.t.Fatalf("random weekly clock = %#v", s.profile.Clock)
 	}
-	if !s.profile.Clock.RandomStartMonth || s.profile.Clock.SimulationDurationMonths != 1 {
-		s.t.Fatalf("random monthly clock = %#v", s.profile.Clock)
+	if s.profile.Credentials.RotationEvents < 1 {
+		s.t.Fatalf("credential rotations = %#v", s.profile.Credentials)
+	}
+	if s.profile.Infrastructure.BackendSurgeVisitors < 1 {
+		s.t.Fatalf("backend surge is not configured: %#v", s.profile.Infrastructure)
 	}
 	if s.profile.Limits.MaxScheduledEvents != 10_000_000 || s.profile.Limits.MaxVisitors != 10_000_000 {
 		s.t.Fatalf("generation limits = %#v", s.profile.Limits)
@@ -96,7 +96,7 @@ func TestWorldGenerationProfileRejectsUnknownFields(t *testing.T) {
 	s.ThenProfileIsRejected()
 }
 
-func TestRandomMonthProfileRejectsSelectionWindowShorterThanOneYear(t *testing.T) {
+func TestRandomWeekProfileRejectsSelectionWindowShorterThanOneYear(t *testing.T) {
 	s := newProfileScenario(t)
 	s.GivenDefaultProfile()
 	data, err := os.ReadFile(s.path)
@@ -107,4 +107,38 @@ func TestRandomMonthProfileRejectsSelectionWindowShorterThanOneYear(t *testing.T
 	s.GivenProfile(strings.Replace(string(data), "2031-01-01T00:00:00Z", "2030-02-01T00:00:00Z", 1))
 	s.WhenProfileIsLoaded()
 	s.ThenProfileIsRejected()
+}
+
+func TestProfileRejectsBackendSurgeThatStillFitsOneBackend(t *testing.T) {
+	s := newProfileScenario(t)
+	s.GivenDefaultProfile()
+	s.WhenProfileIsLoaded()
+	if s.err != nil {
+		t.Fatal(s.err)
+	}
+	s.profile.Infrastructure.BackendSurgeVisitors = 1
+	if err := s.profile.Validate(); !errors.Is(err, generator.ErrInvalidProfile) {
+		t.Fatalf("undersized backend surge accepted: %v", err)
+	}
+}
+
+func TestProfileRejectsRemovedPageAndFixResolution(t *testing.T) {
+	for _, kind := range []string{"page", "attack"} {
+		t.Run(kind, func(t *testing.T) {
+			s := newProfileScenario(t)
+			s.GivenDefaultProfile()
+			s.WhenProfileIsLoaded()
+			if s.err != nil {
+				t.Fatal(s.err)
+			}
+			if kind == "page" {
+				s.profile.Infrastructure.Pages["purchase"] = s.profile.Infrastructure.Pages["product_page"]
+			} else {
+				s.profile.DDoS.Kinds[0].Resolution = "fix_or_expiry"
+			}
+			if err := s.profile.Validate(); !errors.Is(err, generator.ErrInvalidProfile) {
+				t.Fatalf("removed setting accepted: %v", err)
+			}
+		})
+	}
 }

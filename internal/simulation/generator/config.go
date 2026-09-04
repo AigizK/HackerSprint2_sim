@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -32,19 +34,18 @@ type WorldGenerationProfile struct {
 	Journey        JourneyConfig        `yaml:"journey"`
 	Catalog        CatalogConfig        `yaml:"catalog"`
 	Infrastructure InfrastructureConfig `yaml:"infrastructure"`
-	Bugs           BugsConfig           `yaml:"bugs"`
-	Deployments    DeploymentsConfig    `yaml:"deployments"`
 	DDoS           DDoSConfig           `yaml:"ddos"`
-	Economy        EconomyConfig        `yaml:"economy"`
+	Credentials    CredentialsConfig    `yaml:"credentials"`
+	Costs          CostsConfig          `yaml:"costs"`
 	Limits         LimitsConfig         `yaml:"limits"`
 }
 
 type ClockConfig struct {
-	StartsAt                 string `yaml:"starts_at"`
-	EndsAt                   string `yaml:"ends_at"`
-	Timezone                 string `yaml:"timezone"`
-	RandomStartMonth         bool   `yaml:"random_start_month"`
-	SimulationDurationMonths int    `yaml:"simulation_duration_months"`
+	StartsAt               string `yaml:"starts_at"`
+	EndsAt                 string `yaml:"ends_at"`
+	Timezone               string `yaml:"timezone"`
+	RandomStartWeek        bool   `yaml:"random_start_week"`
+	SimulationDurationDays int    `yaml:"simulation_duration_days"`
 }
 
 type TrafficConfig struct {
@@ -68,9 +69,7 @@ type SpecialDayConfig struct {
 
 type JourneyConfig struct {
 	CatalogToProductProbabilityPPM uint32   `yaml:"catalog_to_product_probability_ppm"`
-	ProductToPurchaseProbability   PPMRange `yaml:"product_to_purchase_probability"`
 	CatalogToProductDelaySeconds   IntRange `yaml:"catalog_to_product_delay_seconds"`
-	ProductToPurchaseDelaySeconds  IntRange `yaml:"product_to_purchase_delay_seconds"`
 }
 
 type CatalogConfig struct {
@@ -81,45 +80,30 @@ type CatalogConfig struct {
 }
 
 type InfrastructureConfig struct {
-	InitialBackendInstances    int                   `yaml:"initial_backend_instances"`
-	MinBackendInstances        int                   `yaml:"min_backend_instances"`
-	MaxBackendInstances        int                   `yaml:"max_backend_instances"`
-	ServerCapacityUnits        int64                 `yaml:"server_capacity_units"`
-	ServerCostPerHourMinor     int64                 `yaml:"server_cost_per_hour_minor"`
-	ServerProvisioningSeconds  int64                 `yaml:"server_provisioning_seconds"`
-	ServerGracefulDrainSeconds int64                 `yaml:"server_graceful_drain_seconds"`
-	Pages                      map[string]PageConfig `yaml:"pages"`
+	InitialBackendInstances         int                   `yaml:"initial_backend_instances"`
+	MinBackendInstances             int                   `yaml:"min_backend_instances"`
+	MaxBackendInstances             int                   `yaml:"max_backend_instances"`
+	ServerCapacityUnits             int64                 `yaml:"server_capacity_units"`
+	ServerCostPerHourMinor          int64                 `yaml:"server_cost_per_hour_minor"`
+	ServerProvisioningSeconds       int64                 `yaml:"server_provisioning_seconds"`
+	ServerGracefulDrainSeconds      int64                 `yaml:"server_graceful_drain_seconds"`
+	DatabaseDiskXBytes              int64                 `yaml:"database_disk_x_bytes"`
+	InitialDatabaseDataBytes        int64                 `yaml:"initial_database_data_bytes"`
+	InitialDatabaseLogsBytes        int64                 `yaml:"initial_database_logs_bytes"`
+	DatabaseGrowthEvents            int64                 `yaml:"database_growth_events"`
+	DatabaseGrowthDataBytes         IntRange              `yaml:"database_growth_data_bytes"`
+	DatabaseGrowthLogsBytes         IntRange              `yaml:"database_growth_logs_bytes"`
+	BackendLogGrowthEvents          int64                 `yaml:"backend_log_growth_events"`
+	BackendLogGrowthBytes           IntRange              `yaml:"backend_log_growth_bytes"`
+	BackendSurgeVisitors            int64                 `yaml:"backend_surge_visitors"`
+	DatabaseConnectionSurgeVisitors int64                 `yaml:"database_connection_surge_visitors"`
+	Pages                           map[string]PageConfig `yaml:"pages"`
 }
 
 type PageConfig struct {
 	LoadUnits           IntRange `yaml:"load_units"`
 	ResourceHoldSeconds IntRange `yaml:"resource_hold_seconds"`
 	BaseLatencyMS       IntRange `yaml:"base_latency_ms"`
-}
-
-type BugsConfig struct {
-	InitialBugCount             IntRange          `yaml:"initial_bug_count"`
-	ProductHasBugProbabilityPPM uint32            `yaml:"product_has_bug_probability_ppm"`
-	TriggerProbability          PPMRange          `yaml:"trigger_probability"`
-	PageWeights                 map[string]uint32 `yaml:"page_weights"`
-	FixTokenLength              int               `yaml:"fix_token_length"`
-}
-
-type DeploymentsConfig struct {
-	Count                             IntRange          `yaml:"count"`
-	CostMinor                         IntRange          `yaml:"cost_minor"`
-	DurationSeconds                   IntRange          `yaml:"duration_seconds"`
-	FailureProbability                PPMRange          `yaml:"failure_probability"`
-	EffectsPerDeployment              IntRange          `yaml:"effects_per_deployment"`
-	LoadReduction                     PPMRange          `yaml:"load_reduction"`
-	RequestHoldReduction              PPMRange          `yaml:"request_hold_reduction"`
-	FutureDeploymentDurationReduction PPMRange          `yaml:"future_deployment_duration_reduction"`
-	MinimumFutureDeploymentSeconds    int64             `yaml:"minimum_future_deployment_seconds"`
-	OldBugProbabilityReduction        PPMRange          `yaml:"old_bug_probability_reduction"`
-	NewBugProbabilityPPM              uint32            `yaml:"new_bug_probability_ppm"`
-	NewBugCount                       IntRange          `yaml:"new_bug_count"`
-	NewBugTriggerProbability          PPMRange          `yaml:"new_bug_trigger_probability"`
-	NewBugPageWeights                 map[string]uint32 `yaml:"new_bug_page_weights"`
 }
 
 type DDoSConfig struct {
@@ -136,15 +120,20 @@ type DDoSKindConfig struct {
 	DurationSeconds     IntRange `yaml:"duration_seconds"`
 	RequestsPerMinute   IntRange `yaml:"requests_per_minute"`
 	LoadUnitsPerRequest IntRange `yaml:"load_units_per_request"`
-	FixTokenLength      int      `yaml:"fix_token_length,omitempty"`
+	SourceCIDR          string   `yaml:"source_cidr"`
+	UserAgent           string   `yaml:"user_agent"`
+	RegionCode          string   `yaml:"region_code"`
 }
 
-type EconomyConfig struct {
-	Currency                     string `yaml:"currency"`
-	InitialBalanceMinor          int64  `yaml:"initial_balance_minor"`
-	StopRunWhenBalanceIsNegative bool   `yaml:"stop_run_when_balance_is_negative"`
-	ServerBillingPeriodSeconds   int64  `yaml:"server_billing_period_seconds"`
-	ServerBillingRounding        string `yaml:"server_billing_rounding"`
+type CredentialsConfig struct {
+	RotationEvents       int64    `yaml:"rotation_events"`
+	RotationAfterSeconds IntRange `yaml:"rotation_after_seconds"`
+}
+
+type CostsConfig struct {
+	Currency                   string `yaml:"currency"`
+	ServerBillingPeriodSeconds int64  `yaml:"server_billing_period_seconds"`
+	ServerBillingRounding      string `yaml:"server_billing_rounding"`
 }
 
 type LimitsConfig struct {
@@ -186,13 +175,13 @@ func (p WorldGenerationProfile) Validate() error {
 	if err != nil {
 		return invalid("clock.ends_at must be RFC3339")
 	}
-	if !end.After(start) || p.Clock.SimulationDurationMonths <= 0 {
+	if !end.After(start) || p.Clock.SimulationDurationDays != 7 || !p.Clock.RandomStartWeek {
 		return invalid("clock selection window and simulation duration must be positive")
 	}
-	if p.Clock.RandomStartMonth && end.Sub(start) < 365*24*time.Hour {
-		return invalid("random month selection requires at least a one-year selection window")
+	if end.Sub(start) < 365*24*time.Hour {
+		return invalid("random week selection requires at least a one-year selection window")
 	}
-	if start.AddDate(0, p.Clock.SimulationDurationMonths, 0).After(end) {
+	if start.Add(time.Duration(p.Clock.SimulationDurationDays) * 24 * time.Hour).After(end) {
 		return invalid("simulation duration does not fit clock selection window")
 	}
 	if _, err := time.LoadLocation(p.Clock.Timezone); err != nil {
@@ -226,8 +215,8 @@ func (p WorldGenerationProfile) Validate() error {
 			return invalid("special day %q has unsupported rule %q", special.ID, special.Rule)
 		}
 	}
-	if !validPPM(p.Journey.CatalogToProductProbabilityPPM) || !validPPMRange(p.Journey.ProductToPurchaseProbability) ||
-		!validNonNegativeRange(p.Journey.CatalogToProductDelaySeconds) || !validNonNegativeRange(p.Journey.ProductToPurchaseDelaySeconds) {
+	if !validPPM(p.Journey.CatalogToProductProbabilityPPM) ||
+		!validNonNegativeRange(p.Journey.CatalogToProductDelaySeconds) {
 		return invalid("invalid visitor journey probabilities or delays")
 	}
 	if !validPositiveRange(p.Catalog.ProductCount) || !validPositiveRange(p.Catalog.PriceMinor) ||
@@ -236,11 +225,30 @@ func (p WorldGenerationProfile) Validate() error {
 	}
 	if p.Infrastructure.InitialBackendInstances < p.Infrastructure.MinBackendInstances ||
 		p.Infrastructure.InitialBackendInstances > p.Infrastructure.MaxBackendInstances ||
-		p.Infrastructure.MinBackendInstances < 0 || p.Infrastructure.ServerCapacityUnits <= 0 ||
+		p.Infrastructure.MinBackendInstances < 1 || p.Infrastructure.ServerCapacityUnits <= 0 ||
 		p.Infrastructure.ServerCostPerHourMinor < 0 || p.Infrastructure.ServerProvisioningSeconds <= 0 {
 		return invalid("invalid backend infrastructure configuration")
 	}
-	for _, page := range []string{"product_list", "product_page", "purchase"} {
+	if p.Infrastructure.DatabaseDiskXBytes <= 0 || p.Infrastructure.InitialDatabaseDataBytes < 0 || p.Infrastructure.InitialDatabaseLogsBytes < 0 ||
+		p.Infrastructure.InitialDatabaseDataBytes+p.Infrastructure.InitialDatabaseLogsBytes > p.Infrastructure.DatabaseDiskXBytes ||
+		p.Infrastructure.DatabaseGrowthEvents <= 0 || !validNonNegativeRange(p.Infrastructure.DatabaseGrowthDataBytes) ||
+		!validNonNegativeRange(p.Infrastructure.DatabaseGrowthLogsBytes) ||
+		p.Infrastructure.InitialDatabaseDataBytes+p.Infrastructure.DatabaseGrowthEvents*p.Infrastructure.DatabaseGrowthDataBytes.Max > 4*p.Infrastructure.DatabaseDiskXBytes {
+		return invalid("invalid database infrastructure configuration")
+	}
+	if p.Infrastructure.DatabaseGrowthDataBytes.Max+p.Infrastructure.DatabaseGrowthLogsBytes.Max <= 0 ||
+		p.Infrastructure.DatabaseGrowthEvents >= p.Traffic.TargetScheduledEvents {
+		return invalid("database growth must leave room for traffic")
+	}
+	if p.Infrastructure.BackendLogGrowthEvents <= 0 || !validPositiveRange(p.Infrastructure.BackendLogGrowthBytes) ||
+		p.Infrastructure.BackendLogGrowthBytes.Min != p.Infrastructure.BackendLogGrowthBytes.Max ||
+		p.Infrastructure.BackendLogGrowthEvents*p.Infrastructure.BackendLogGrowthBytes.Min != p.Infrastructure.DatabaseDiskXBytes {
+		return invalid("backend log growth must fill exactly one backend disk")
+	}
+	if len(p.Infrastructure.Pages) != 2 {
+		return invalid("only product_list and product_page are supported")
+	}
+	for _, page := range []string{"product_list", "product_page"} {
 		config, exists := p.Infrastructure.Pages[page]
 		if !exists || !validPositiveRange(config.LoadUnits) || !validPositiveRange(config.ResourceHoldSeconds) || !validPositiveRange(config.BaseLatencyMS) {
 			return invalid("invalid or missing page configuration for %q", page)
@@ -249,21 +257,29 @@ func (p WorldGenerationProfile) Validate() error {
 			return invalid("page %q load cannot fit on one server", page)
 		}
 	}
-	if !validNonNegativeRange(p.Bugs.InitialBugCount) || !validPPM(p.Bugs.ProductHasBugProbabilityPPM) ||
-		!validPPMRange(p.Bugs.TriggerProbability) || !validWeights(p.Bugs.PageWeights) || p.Bugs.FixTokenLength < 8 {
-		return invalid("invalid bug configuration")
+	listPage := p.Infrastructure.Pages["product_list"]
+	productPage := p.Infrastructure.Pages["product_page"]
+	if p.Infrastructure.BackendSurgeVisitors < 0 ||
+		(p.Infrastructure.BackendSurgeVisitors > 0 &&
+			(p.Infrastructure.BackendSurgeVisitors*listPage.LoadUnits.Min <= p.Infrastructure.ServerCapacityUnits ||
+				listPage.LoadUnits.Max+productPage.LoadUnits.Max > p.Infrastructure.ServerCapacityUnits ||
+				p.Infrastructure.BackendSurgeVisitors > p.Traffic.TargetScheduledEvents)) {
+		return invalid("backend surge must overload one backend and fit on two")
 	}
-	if !validNonNegativeRange(p.Deployments.Count) || !validNonNegativeRange(p.Deployments.CostMinor) ||
-		!validPositiveRange(p.Deployments.DurationSeconds) || !validPPMRange(p.Deployments.FailureProbability) ||
-		!validNonNegativeRange(p.Deployments.EffectsPerDeployment) || !validPPMRange(p.Deployments.LoadReduction) ||
-		!validPPMRange(p.Deployments.RequestHoldReduction) || !validPPMRange(p.Deployments.FutureDeploymentDurationReduction) ||
-		p.Deployments.FutureDeploymentDurationReduction.Max >= ProbabilityScale || p.Deployments.MinimumFutureDeploymentSeconds <= 0 ||
-		!validPPMRange(p.Deployments.OldBugProbabilityReduction) || !validPPM(p.Deployments.NewBugProbabilityPPM) ||
-		!validNonNegativeRange(p.Deployments.NewBugCount) || !validPPMRange(p.Deployments.NewBugTriggerProbability) ||
-		!validWeights(p.Deployments.NewBugPageWeights) {
-		return invalid("invalid deployment configuration")
+	if p.Infrastructure.DatabaseConnectionSurgeVisitors < 0 ||
+		(p.Infrastructure.DatabaseConnectionSurgeVisitors > 0 &&
+			(p.Infrastructure.DatabaseConnectionSurgeVisitors <= model.DBSmallConnections ||
+				p.Infrastructure.BackendSurgeVisitors+p.Infrastructure.DatabaseConnectionSurgeVisitors > p.Traffic.TargetScheduledEvents ||
+				p.Infrastructure.DatabaseConnectionSurgeVisitors*(listPage.LoadUnits.Max+productPage.LoadUnits.Max) >
+					int64(p.Infrastructure.MaxBackendInstances)*p.Infrastructure.ServerCapacityUnits)) {
+		return invalid("database connection surge must exceed db.small and fit configured backends")
 	}
 	if p.DDoS.Enabled {
+		for page := range p.DDoS.TargetPageWeights {
+			if page != "product_list" && page != "product_page" {
+				return invalid("unsupported DDoS page %q", page)
+			}
+		}
 		if !validNonNegativeRange(p.DDoS.AttackCount) || !validWeights(p.DDoS.TargetPageWeights) || len(p.DDoS.Kinds) == 0 {
 			return invalid("invalid DDoS configuration")
 		}
@@ -271,17 +287,29 @@ func (p WorldGenerationProfile) Validate() error {
 			return invalid("target scheduled events must leave room for visitors after DDoS events")
 		}
 		for _, kind := range p.DDoS.Kinds {
+			prefix, prefixErr := netip.ParsePrefix(kind.SourceCIDR)
 			if kind.ID == "" || kind.Weight == 0 ||
-				(kind.Resolution != "scale_or_expiry" && kind.Resolution != "fix_or_expiry" && kind.Resolution != "expiry_only") ||
+				(kind.Resolution != "scale_or_expiry") ||
 				!validPositiveRange(kind.DurationSeconds) || !validPositiveRange(kind.RequestsPerMinute) ||
-				!validPositiveRange(kind.LoadUnitsPerRequest) || (kind.Resolution == "fix_or_expiry" && kind.FixTokenLength < 8) {
+				!validPositiveRange(kind.LoadUnitsPerRequest) || strings.TrimSpace(kind.SourceCIDR) == "" ||
+				strings.TrimSpace(kind.UserAgent) == "" || len(kind.RegionCode) != 2 || kind.RegionCode != strings.ToUpper(kind.RegionCode) ||
+				prefixErr != nil || prefix != prefix.Masked() {
 				return invalid("invalid DDoS kind %q", kind.ID)
 			}
 		}
 	}
-	if len(p.Economy.Currency) != 3 || p.Economy.Currency != strings.ToUpper(p.Economy.Currency) || p.Economy.InitialBalanceMinor <= 0 || !p.Economy.StopRunWhenBalanceIsNegative ||
-		p.Economy.ServerBillingPeriodSeconds <= 0 || p.Economy.ServerBillingRounding != "ceil" {
-		return invalid("invalid economy configuration")
+	reservedScenarioEvents := p.Credentials.RotationEvents + p.Infrastructure.DatabaseGrowthEvents + p.Infrastructure.BackendLogGrowthEvents
+	if p.DDoS.Enabled {
+		reservedScenarioEvents += 2 * p.DDoS.AttackCount.Max
+	}
+	if p.Credentials.RotationEvents <= 0 || !validPositiveRange(p.Credentials.RotationAfterSeconds) ||
+		p.Credentials.RotationAfterSeconds.Max >= int64(p.Clock.SimulationDurationDays)*24*60*60 ||
+		p.Traffic.TargetScheduledEvents <= reservedScenarioEvents {
+		return invalid("invalid credential rotation configuration")
+	}
+	if len(p.Costs.Currency) != 3 || p.Costs.Currency != strings.ToUpper(p.Costs.Currency) ||
+		p.Costs.ServerBillingPeriodSeconds != 3600 || p.Costs.ServerBillingRounding != "ceil" {
+		return invalid("invalid costs configuration")
 	}
 	if p.Limits.MaxScheduledEvents <= 0 || p.Limits.MaxVisitors <= 0 || p.Limits.MaxVisitors > p.Limits.MaxScheduledEvents {
 		return invalid("invalid generation limits")
@@ -293,7 +321,6 @@ func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalidProfile, fmt.Sprintf(format, args...))
 }
 func validPPM(value uint32) bool                { return value <= ProbabilityScale }
-func validPPMRange(value PPMRange) bool         { return value.Min <= value.Max && validPPM(value.Max) }
 func validPositiveRange(value IntRange) bool    { return value.Min > 0 && value.Min <= value.Max }
 func validNonNegativeRange(value IntRange) bool { return value.Min >= 0 && value.Min <= value.Max }
 func validMultiplierPPM(value uint32) bool      { return value <= 10*ProbabilityScale }

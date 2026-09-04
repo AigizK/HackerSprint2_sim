@@ -33,15 +33,19 @@ func Project(stream []events.Event) ([]Entry, error) {
 				return nil, fmt.Errorf("request %q rejected without start", event.RequestID)
 			}
 			entries = append(entries, Entry{
-				Timestamp:  event.RejectedAt,
-				RequestID:  request.RequestID,
-				Source:     request.Source,
-				VisitorID:  request.VisitorID,
-				Page:       request.Page,
-				ProductID:  request.ProductID,
-				StatusCode: event.StatusCode,
-				ErrorCode:  event.ErrorCode,
-				Message:    event.Message,
+				Timestamp:      event.RejectedAt,
+				RequestID:      request.RequestID,
+				Source:         request.Source,
+				VisitorID:      request.VisitorID,
+				Page:           request.Page,
+				ProductID:      request.ProductID,
+				SourceIP:       request.SourceIP,
+				UserAgent:      request.UserAgent,
+				RegionCode:     request.RegionCode,
+				FirewallRuleID: event.FirewallRuleID,
+				StatusCode:     event.StatusCode,
+				ErrorCode:      event.ErrorCode,
+				Message:        event.Message,
 			})
 		}
 	}
@@ -50,14 +54,18 @@ func Project(stream []events.Event) ([]Entry, error) {
 
 func entryFromCompleted(request events.PageRequestStarted, completed events.PageRequestCompleted) Entry {
 	return Entry{
-		Timestamp:  completed.CompletedAt,
-		RequestID:  request.RequestID,
-		Source:     request.Source,
-		VisitorID:  request.VisitorID,
-		Page:       request.Page,
-		ProductID:  request.ProductID,
-		StatusCode: completed.StatusCode,
-		ErrorCode:  completed.ErrorCode,
-		Message:    completed.Message,
+		Timestamp:      completed.CompletedAt,
+		RequestID:      request.RequestID,
+		Source:         request.Source,
+		VisitorID:      request.VisitorID,
+		Page:           request.Page,
+		ProductID:      request.ProductID,
+		SourceIP:       request.SourceIP,
+		UserAgent:      request.UserAgent,
+		RegionCode:     request.RegionCode,
+		FirewallRuleID: completed.FirewallRuleID,
+		StatusCode:     completed.StatusCode,
+		ErrorCode:      completed.ErrorCode,
+		Message:        completed.Message,
 	}
 }

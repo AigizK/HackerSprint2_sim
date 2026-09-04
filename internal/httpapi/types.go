@@ -1,6 +1,11 @@
 package httpapi
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
+)
 
 type clockResponse struct {
 	SimulationTime        time.Time `json:"simulation_time"`
@@ -18,28 +23,43 @@ type startRunRequest struct {
 }
 
 type startRunResponse struct {
-	RunID          string    `json:"run_id"`
-	Seed           int64     `json:"seed"`
-	AgentID        string    `json:"agent_id"`
-	AgentVersion   string    `json:"agent_version"`
-	Status         string    `json:"status"`
-	SimulationTime time.Time `json:"simulation_time"`
-	SimulationEnds time.Time `json:"simulation_ends_at"`
+	RunID            string                   `json:"run_id"`
+	Seed             int64                    `json:"seed"`
+	AgentID          string                   `json:"agent_id"`
+	AgentVersion     string                   `json:"agent_version"`
+	Status           string                   `json:"status"`
+	SimulationTime   time.Time                `json:"simulation_time"`
+	SimulationEnds   time.Time                `json:"simulation_ends_at"`
+	CommandsMarkdown string                   `json:"commands_markdown"`
+	ControlPanelAuth controlPanelAuthResponse `json:"control_panel_auth"`
+}
+
+type controlPanelAuthResponse struct {
+	Scheme       string `json:"scheme"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	Instructions string `json:"instructions"`
 }
 
 type overviewResponse struct {
-	Clock               clockResponse `json:"clock"`
-	RunID               string        `json:"run_id"`
-	Status              string        `json:"status"`
-	SiteStatus          string        `json:"site_status"`
-	CurrentDeploymentID *string       `json:"current_deployment_id"`
-	ServerCount         int           `json:"server_count"`
-	CapacityUtilization float64       `json:"capacity_utilization"`
-	ErrorRate           float64       `json:"error_rate"`
-	SuccessfulPurchases uint64        `json:"successful_purchases"`
-	RevenueMinor        int64         `json:"revenue_minor"`
-	ServerCostMinor     int64         `json:"server_cost_minor"`
-	BalanceMinor        int64         `json:"balance_minor"`
+	Costs               costsResponse        `json:"costs"`
+	Availability        availabilityResponse `json:"availability"`
+	Clock               clockResponse        `json:"clock"`
+	RunID               string               `json:"run_id"`
+	Status              string               `json:"status"`
+	SiteStatus          string               `json:"site_status"`
+	ServerCount         int                  `json:"server_count"`
+	CapacityUtilization float64              `json:"capacity_utilization"`
+	ErrorRate           float64              `json:"error_rate"`
+}
+
+type availabilityResponse struct {
+	UptimeTarget     float64  `json:"uptime_target"`
+	ObservedSeconds  float64  `json:"observed_seconds"`
+	AvailableSeconds float64  `json:"available_seconds"`
+	DowntimeSeconds  float64  `json:"downtime_seconds"`
+	UptimeRatio      *float64 `json:"uptime_ratio"`
+	SLOPassed        *bool    `json:"slo_passed"`
 }
 
 type timeWindowResponse struct {
@@ -59,26 +79,41 @@ type pageMetricsResponse struct {
 	ActiveRequests int     `json:"active_requests"`
 	UsedLoadUnits  int64   `json:"used_load_units"`
 	Responses200   uint64  `json:"responses_200"`
+	Responses403   uint64  `json:"responses_403"`
 	Responses500   uint64  `json:"responses_500"`
+	Responses503   uint64  `json:"responses_503"`
 	ErrorRate      float64 `json:"error_rate"`
 }
 
 type metricSnapshotResponse struct {
-	ServerCount         int                   `json:"server_count"`
-	CapacityUnits       int64                 `json:"capacity_units"`
-	UsedLoadUnits       int64                 `json:"used_load_units"`
-	CapacityUtilization float64               `json:"capacity_utilization"`
-	ActiveRequests      int                   `json:"active_requests"`
-	Responses200        uint64                `json:"responses_200"`
-	Responses500        uint64                `json:"responses_500"`
-	ErrorRate           float64               `json:"error_rate"`
-	LatencyP50MS        float64               `json:"latency_p50_ms,omitempty"`
-	LatencyP95MS        float64               `json:"latency_p95_ms,omitempty"`
-	SuccessfulPurchases uint64                `json:"successful_purchases"`
-	RevenueMinor        int64                 `json:"revenue_minor"`
-	LostRevenueMinor    int64                 `json:"lost_revenue_minor"`
-	ServerCostMinor     int64                 `json:"server_cost_minor"`
-	ByPage              []pageMetricsResponse `json:"by_page"`
+	ServerCount               int                   `json:"server_count"`
+	CapacityUnits             int64                 `json:"capacity_units"`
+	UsedLoadUnits             int64                 `json:"used_load_units"`
+	CapacityUtilization       float64               `json:"capacity_utilization"`
+	ActiveRequests            int                   `json:"active_requests"`
+	DatabaseActiveConnections int                   `json:"database_active_connections"`
+	DatabaseConnectionLimit   int                   `json:"database_connection_limit"`
+	DiskTotalBytes            int64                 `json:"disk_total_bytes"`
+	DiskSystemBytes           int64                 `json:"disk_system_bytes"`
+	DiskDatabaseBytes         int64                 `json:"disk_database_bytes"`
+	DiskLogsBytes             int64                 `json:"disk_logs_bytes"`
+	DiskFreeBytes             int64                 `json:"disk_free_bytes"`
+	Responses200              uint64                `json:"responses_200"`
+	Responses403              uint64                `json:"responses_403"`
+	Responses500              uint64                `json:"responses_500"`
+	Responses503              uint64                `json:"responses_503"`
+	ErrorRate                 float64               `json:"error_rate"`
+	LatencyP50MS              float64               `json:"latency_p50_ms,omitempty"`
+	LatencyP95MS              float64               `json:"latency_p95_ms,omitempty"`
+	ServerCostMinor           int64                 `json:"server_cost_minor"`
+	BackupStorageCostMinor    int64                 `json:"backup_storage_cost_minor"`
+	TotalCostMinor            int64                 `json:"total_cost_minor"`
+	CurrentCostPerHourMinor   int64                 `json:"current_cost_per_hour_minor"`
+	ObservedSeconds           float64               `json:"observed_seconds"`
+	AvailableSeconds          float64               `json:"available_seconds"`
+	DowntimeSeconds           float64               `json:"downtime_seconds"`
+	UptimeRatio               *float64              `json:"uptime_ratio"`
+	ByPage                    []pageMetricsResponse `json:"by_page"`
 }
 
 type metricsResponse struct {
@@ -89,18 +124,22 @@ type metricsResponse struct {
 }
 
 type requestLogResponse struct {
-	Timestamp time.Time `json:"timestamp"`
-	RequestID string    `json:"request_id"`
-	Source    string    `json:"source"`
-	VisitorID *string   `json:"visitor_id,omitempty"`
-	Page      string    `json:"page"`
-	ProductID *string   `json:"product_id,omitempty"`
-	Status    int       `json:"status"`
-	LatencyMS float64   `json:"latency_ms,omitempty"`
-	LoadUnits int64     `json:"load_units"`
-	ServerID  *string   `json:"server_id,omitempty"`
-	Error     *string   `json:"error,omitempty"`
-	Message   *string   `json:"message,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+	RequestID      string    `json:"request_id"`
+	Source         string    `json:"source"`
+	VisitorID      *string   `json:"visitor_id,omitempty"`
+	Page           string    `json:"page"`
+	ProductID      *string   `json:"product_id,omitempty"`
+	SourceIP       string    `json:"source_ip"`
+	UserAgent      string    `json:"user_agent"`
+	RegionCode     string    `json:"region_code"`
+	FirewallRuleID *string   `json:"firewall_rule_id"`
+	Status         int       `json:"status"`
+	LatencyMS      float64   `json:"latency_ms,omitempty"`
+	LoadUnits      int64     `json:"load_units"`
+	ServerID       *string   `json:"server_id,omitempty"`
+	Error          *string   `json:"error,omitempty"`
+	Message        *string   `json:"message,omitempty"`
 }
 
 type logsResponse struct {
@@ -109,66 +148,52 @@ type logsResponse struct {
 	NextCursor *string              `json:"next_cursor"`
 }
 
+type inboxMessageResponse struct {
+	MessageID   string    `json:"message_id"`
+	SenderEmail string    `json:"sender_email"`
+	SentAt      time.Time `json:"sent_at"`
+	Subject     string    `json:"subject"`
+	Description string    `json:"description"`
+}
+
+type inboxResponse struct {
+	Clock      clockResponse          `json:"clock"`
+	Messages   []inboxMessageResponse `json:"messages"`
+	NextCursor *string                `json:"next_cursor"`
+}
+
 type serverResourceResponse struct {
-	ServerID         string `json:"server_id"`
-	Status           string `json:"status"`
-	CapacityUnits    int64  `json:"capacity_units"`
-	UsedLoadUnits    int64  `json:"used_load_units"`
-	CostPerHourMinor int64  `json:"cost_per_hour_minor"`
+	ServerID         string            `json:"server_id"`
+	Name             string            `json:"name"`
+	Role             string            `json:"role"`
+	InstanceType     string            `json:"instance_type"`
+	Status           string            `json:"status"`
+	CapacityUnits    int64             `json:"capacity_units"`
+	UsedLoadUnits    int64             `json:"used_load_units"`
+	CostPerHourMinor int64             `json:"cost_per_hour_minor"`
+	Disk             diskUsageResponse `json:"disk"`
+	DatabaseIDs      []string          `json:"database_ids"`
+	CredentialID     string            `json:"credential_id"`
+}
+
+type diskUsageResponse struct {
+	ServerID       string `json:"server_id"`
+	TotalBytes     int64  `json:"total_bytes"`
+	SystemBytes    int64  `json:"system_bytes"`
+	DatabaseBytes  int64  `json:"database_bytes"`
+	LogsBytes      int64  `json:"logs_bytes"`
+	UsedBytes      int64  `json:"used_bytes"`
+	FreeBytes      int64  `json:"free_bytes"`
+	CleanableBytes int64  `json:"cleanable_bytes"`
 }
 
 type resourcesResponse struct {
 	Clock                 clockResponse            `json:"clock"`
-	DesiredInstances      int                      `json:"desired_instances"`
 	ActiveInstances       int                      `json:"active_instances"`
 	TotalCapacityUnits    int64                    `json:"total_capacity_units"`
 	UsedLoadUnits         int64                    `json:"used_load_units"`
 	TotalCostPerHourMinor int64                    `json:"total_cost_per_hour_minor"`
 	Servers               []serverResourceResponse `json:"servers"`
-}
-
-type scaleBackendRequest struct {
-	RequestID        string `json:"request_id"`
-	DesiredInstances *int   `json:"desired_instances"`
-}
-
-type operationAcceptedResponse struct {
-	Clock               clockResponse `json:"clock"`
-	OperationID         string        `json:"operation_id"`
-	Status              string        `json:"status"`
-	EstimatedCompleteAt *time.Time    `json:"estimated_complete_at"`
-}
-
-type applyFixRequest struct {
-	RequestID string `json:"request_id"`
-	Message   string `json:"message"`
-}
-
-type applyFixResponse struct {
-	Clock       clockResponse `json:"clock"`
-	Applied     bool          `json:"applied"`
-	FixedBug    *string       `json:"fixed_bug,omitempty"`
-	FixedAttack *string       `json:"fixed_attack,omitempty"`
-	Message     string        `json:"message,omitempty"`
-}
-
-type deploymentResponse struct {
-	DeploymentID string  `json:"deployment_id"`
-	Sequence     int     `json:"sequence"`
-	Name         string  `json:"name"`
-	Description  string  `json:"description,omitempty"`
-	Status       string  `json:"status"`
-	OperationID  *string `json:"operation_id,omitempty"`
-}
-
-type deploymentsResponse struct {
-	Clock       clockResponse        `json:"clock"`
-	Deployments []deploymentResponse `json:"deployments"`
-}
-
-type startDeploymentRequest struct {
-	RequestID    string `json:"request_id"`
-	DeploymentID string `json:"deployment_id"`
 }
 
 type errorResponse struct {
@@ -181,11 +206,14 @@ type operationResponse struct {
 	Clock       clockResponse  `json:"clock"`
 	OperationID string         `json:"operation_id"`
 	Type        string         `json:"type"`
+	Command     string         `json:"command"`
+	RequestID   string         `json:"request_id"`
 	Status      string         `json:"status"`
 	Progress    float64        `json:"progress"`
 	SubmittedAt time.Time      `json:"submitted_at"`
 	StartedAt   *time.Time     `json:"started_at,omitempty"`
 	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+	Result      any            `json:"result"`
 	Error       *errorResponse `json:"error,omitempty"`
 }
 
@@ -196,27 +224,19 @@ type probeRequest struct {
 }
 
 type probeResponse struct {
-	Clock     clockResponse `json:"clock"`
-	RequestID string        `json:"request_id"`
-	Page      string        `json:"page"`
-	ProductID *string       `json:"product_id,omitempty"`
-	Status    int           `json:"status"`
-	LatencyMS float64       `json:"latency_ms"`
-	LoadUnits int64         `json:"load_units"`
-	Error     *string       `json:"error,omitempty"`
-	Message   *string       `json:"message,omitempty"`
-}
-
-type economyResponse struct {
-	Clock               clockResponse `json:"clock"`
-	Currency            string        `json:"currency"`
-	SuccessfulPurchases uint64        `json:"successful_purchases"`
-	LostPurchases       uint64        `json:"lost_purchases"`
-	RevenueMinor        int64         `json:"revenue_minor"`
-	LostRevenueMinor    int64         `json:"lost_revenue_minor"`
-	ServerCostMinor     int64         `json:"server_cost_minor"`
-	DeploymentCostMinor int64         `json:"deployment_cost_minor"`
-	BalanceMinor        int64         `json:"balance_minor"`
+	Clock          clockResponse `json:"clock"`
+	RequestID      string        `json:"request_id"`
+	Page           string        `json:"page"`
+	ProductID      *string       `json:"product_id,omitempty"`
+	SourceIP       string        `json:"source_ip"`
+	UserAgent      string        `json:"user_agent"`
+	RegionCode     string        `json:"region_code"`
+	FirewallRuleID *string       `json:"firewall_rule_id"`
+	Status         int           `json:"status"`
+	LatencyMS      float64       `json:"latency_ms"`
+	LoadUnits      int64         `json:"load_units"`
+	Error          *string       `json:"error,omitempty"`
+	Message        *string       `json:"message,omitempty"`
 }
 
 type advanceTimeRequest struct {
@@ -231,4 +251,83 @@ type advanceTimeResponse struct {
 	ProcessedEvents          int           `json:"processed_events"`
 	NewLogs                  int           `json:"new_logs"`
 	LogsCursor               *string       `json:"logs_cursor,omitempty"`
+}
+
+type controlCommandRequest struct {
+	RequestID  string             `json:"request_id"`
+	Command    string             `json:"command"`
+	Params     json.RawMessage    `json:"params"`
+	TargetAuth *targetAuthRequest `json:"target_auth,omitempty"`
+}
+
+type targetAuthRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type firewallDeleteParams struct {
+	RuleID model.FirewallRuleID `json:"rule_id"`
+}
+
+type firewallRuleResponse struct {
+	model.FirewallRule
+	Revision uint64 `json:"revision"`
+}
+
+type firewallRulesListResultResponse struct {
+	Rules []firewallRuleResponse `json:"rules"`
+}
+
+type firewallRuleResultResponse struct {
+	Rule firewallRuleResponse `json:"rule"`
+}
+
+type firewallRuleDeletedResultResponse struct {
+	RuleID  model.FirewallRuleID `json:"rule_id"`
+	Deleted bool                 `json:"deleted"`
+}
+
+type controlCommandResponse struct {
+	Clock     clockResponse `json:"clock"`
+	RequestID string        `json:"request_id"`
+	Command   string        `json:"command"`
+	Result    any           `json:"result"`
+}
+
+type controlOperationAcceptedResponse struct {
+	Clock               clockResponse `json:"clock"`
+	RequestID           string        `json:"request_id"`
+	Command             string        `json:"command"`
+	OperationID         string        `json:"operation_id"`
+	Status              string        `json:"status"`
+	EstimatedCompleteAt *time.Time    `json:"estimated_complete_at,omitempty"`
+}
+
+type commandDefinitionResponse struct {
+	Command            string         `json:"command"`
+	Description        string         `json:"description"`
+	ParamsSchema       map[string]any `json:"params_schema"`
+	ResultSchema       map[string]any `json:"result_schema"`
+	TargetAuthRequired bool           `json:"target_auth_required"`
+	Execution          string         `json:"execution"`
+}
+
+type controlCommandsResponse struct {
+	Clock    clockResponse               `json:"clock"`
+	Commands []commandDefinitionResponse `json:"commands"`
+}
+
+type credentialRecordResponse struct {
+	CredentialID string    `json:"credential_id"`
+	ResourceID   string    `json:"resource_id"`
+	Version      uint64    `json:"version"`
+	Username     string    `json:"username"`
+	Password     string    `json:"password"`
+	ValidFrom    time.Time `json:"valid_from"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+type credentialsResponse struct {
+	Clock      clockResponse            `json:"clock"`
+	Credential credentialRecordResponse `json:"credential"`
 }

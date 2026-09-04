@@ -6,7 +6,6 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,6 +21,12 @@ var initialSchema string
 
 //go:embed migrations/002_http_readiness.sql
 var httpReadinessMigration string
+
+//go:embed migrations/003_control_credentials.sql
+var controlCredentialsMigration string
+
+//go:embed migrations/004_server_credentials.sql
+var serverCredentialsMigration string
 
 type Store struct{ db *sql.DB }
 
@@ -46,6 +51,14 @@ func Open(path string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("apply sqlite migration 2: %w", err)
 		}
+	}
+	if _, err := db.Exec(controlCredentialsMigration); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply sqlite migration 3: %w", err)
+	}
+	if _, err := db.Exec(serverCredentialsMigration); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply sqlite migration 4: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -111,10 +124,7 @@ func (s *Store) CreateWorld(ctx context.Context, world generator.WorldDefinition
 		(world.Source != "generated" && world.Source != "manual") {
 		return fmt.Errorf("%w: invalid world definition", generator.ErrInvalidProfile)
 	}
-	evaluation, err := json.Marshal(world.Evaluation)
-	if err != nil {
-		return fmt.Errorf("encode world evaluation: %w", err)
-	}
+	var err error
 	var definition []byte
 	if world.Source == "manual" {
 		definition, err = encodeManualWorld(world)
@@ -124,10 +134,10 @@ func (s *Store) CreateWorld(ctx context.Context, world generator.WorldDefinition
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO worlds(
         world_id, seed, profile_version, profile_hash, generator_version,
-        schedule_hash, source, starts_at, ends_at, created_at, evaluation_json, definition_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        schedule_hash, source, starts_at, ends_at, created_at, definition_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		world.WorldID, world.Key.Seed, world.ProfileVersion, world.Key.ProfileHash, world.Key.GeneratorVersion,
-		world.ScheduleHash, world.Source, formatTime(world.StartsAt), formatTime(world.EndsAt), formatTime(world.CreatedAt), evaluation, definition)
+		world.ScheduleHash, world.Source, formatTime(world.StartsAt), formatTime(world.EndsAt), formatTime(world.CreatedAt), definition)
 	if isUniqueViolation(err) {
 		return generator.ErrWorldAlreadyExists
 	}
@@ -169,13 +179,12 @@ func (s *Store) GetWorld(ctx context.Context, worldID string) (generator.WorldDe
 func (s *Store) FindWorld(ctx context.Context, key generator.WorldKey) (generator.WorldDefinition, error) {
 	world := generator.WorldDefinition{Key: key}
 	var startsAt, endsAt, createdAt string
-	var evaluation []byte
 	err := s.db.QueryRowContext(ctx, `SELECT world_id, profile_version, schedule_hash, source,
-        starts_at, ends_at, created_at, evaluation_json FROM worlds
+        starts_at, ends_at, created_at FROM worlds
         WHERE seed = ? AND profile_hash = ? AND generator_version = ?`,
 		key.Seed, key.ProfileHash, key.GeneratorVersion).Scan(
 		&world.WorldID, &world.ProfileVersion, &world.ScheduleHash, &world.Source,
-		&startsAt, &endsAt, &createdAt, &evaluation)
+		&startsAt, &endsAt, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return generator.WorldDefinition{}, generator.ErrWorldNotFound
 	}
@@ -190,9 +199,6 @@ func (s *Store) FindWorld(ctx context.Context, key generator.WorldKey) (generato
 	}
 	if world.CreatedAt, err = parseTime(createdAt); err != nil {
 		return generator.WorldDefinition{}, err
-	}
-	if err := json.Unmarshal(evaluation, &world.Evaluation); err != nil {
-		return generator.WorldDefinition{}, fmt.Errorf("decode world evaluation: %w", err)
 	}
 	return world, nil
 }

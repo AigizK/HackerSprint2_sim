@@ -1,23 +1,20 @@
 package model
 
 type ProductID string
-type PurchaseID string
+type MessageID string
 type VisitorID string
 type RequestID string
 type ServerID string
-type BugID string
-type DeploymentID string
 type OperationID string
-type ProviderID string
 type AttackID string
 type CommandID string
+type CredentialID string
 
 type PageType string
 
 const (
 	PageProductList PageType = "product_list"
 	PageProduct     PageType = "product_page"
-	PagePurchase    PageType = "purchase"
 )
 
 type RequestSource string
@@ -30,12 +27,12 @@ const (
 type RequestFailureCode string
 
 const (
-	FailureServerCapacityExceeded       RequestFailureCode = "SERVER_CAPACITY_EXCEEDED"
-	FailurePageBug                      RequestFailureCode = "PAGE_BUG"
-	FailureDeployment                   RequestFailureCode = "DEPLOYMENT_ERROR"
-	FailureExternalProvider             RequestFailureCode = "EXTERNAL_PROVIDER_ERROR"
-	FailureDDoSMitigationRequired       RequestFailureCode = "DDOS_MITIGATION_REQUIRED"
-	FailureBruteForceMitigationRequired RequestFailureCode = "BRUTE_FORCE_MITIGATION_REQUIRED"
+	FailureServerCapacityExceeded RequestFailureCode = "SERVER_CAPACITY_EXCEEDED"
+	FailureDBConnectionLimit      RequestFailureCode = "DB_CONNECTION_LIMIT_EXCEEDED"
+	FailureDiskFull               RequestFailureCode = "DISK_FULL"
+	FailureSiteUnavailable        RequestFailureCode = "SITE_UNAVAILABLE"
+	FailureDatabaseUnavailable    RequestFailureCode = "DB_UNAVAILABLE"
+	FailureFirewallDenied         RequestFailureCode = "FIREWALL_DENIED"
 )
 
 type PageRequestStatus string
@@ -46,48 +43,18 @@ const (
 	PageRequestFailed     PageRequestStatus = "failed"
 )
 
-type BugStatus string
-
-const (
-	BugActive BugStatus = "active"
-	BugFixed  BugStatus = "fixed"
-)
-
-type FixSubmissionStatus string
-
-const (
-	FixSubmitted FixSubmissionStatus = "submitted"
-	FixAccepted  FixSubmissionStatus = "accepted"
-	FixRejected  FixSubmissionStatus = "rejected"
-)
-
-type RevenueLossReason string
-
-const (
-	RevenueLostToCapacity      RevenueLossReason = "server_capacity_exceeded"
-	RevenueLostToPageBug       RevenueLossReason = "page_bug"
-	RevenueLostToDeployment    RevenueLossReason = "deployment_error"
-	RevenueLostToProvider      RevenueLossReason = "external_provider_error"
-	RevenueLostToAbandonment   RevenueLossReason = "visitor_abandoned"
-	RevenueLostToSimulationEnd RevenueLossReason = "simulation_ended"
-)
-
 type VisitorOutcome string
 
 const (
 	VisitorLeftAfterProductList VisitorOutcome = "left_after_product_list"
 	VisitorLeftAfterProductPage VisitorOutcome = "left_after_product_page"
 	VisitorLeftAfterPageError   VisitorOutcome = "left_after_page_error"
-	VisitorPurchased            VisitorOutcome = "purchased"
 	VisitorSimulationEnded      VisitorOutcome = "simulation_ended"
 )
 
 type OperationKind string
 
-const (
-	OperationScaleBackend OperationKind = "scale_backend"
-	OperationDeployment   OperationKind = "deployment"
-)
+const OperationControlCommand OperationKind = "control_command"
 
 type OperationLifecycleStatus string
 
@@ -108,18 +75,6 @@ const (
 	ServerFailed       ServerLifecycleStatus = "failed"
 )
 
-type DeploymentLifecycleStatus string
-
-const (
-	DeploymentStatusLocked    DeploymentLifecycleStatus = "locked"
-	DeploymentStatusAvailable DeploymentLifecycleStatus = "available"
-	DeploymentStatusQueued    DeploymentLifecycleStatus = "queued"
-	DeploymentStatusRunning   DeploymentLifecycleStatus = "running"
-	DeploymentStatusApplied   DeploymentLifecycleStatus = "applied"
-	DeploymentStatusSucceeded DeploymentLifecycleStatus = "succeeded"
-	DeploymentStatusFailed    DeploymentLifecycleStatus = "failed"
-)
-
 type AttackKind string
 
 const (
@@ -131,6 +86,4 @@ type AttackResolution string
 
 const (
 	AttackScaleOrExpiry AttackResolution = "scale_or_expiry"
-	AttackFixOrExpiry   AttackResolution = "fix_or_expiry"
-	AttackExpiryOnly    AttackResolution = "expiry_only"
 )

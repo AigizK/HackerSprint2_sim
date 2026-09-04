@@ -46,7 +46,7 @@ func (s *fileJournalScenario) GivenAgentRequestIsRecordedAndCompleted() {
 	s.t.Helper()
 	receivedAt := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
 	if err := s.store.RecordAgentRequest(s.ctx, s.runID, journal.AgentRequestReceived{
-		RequestID: "request-1", AgentID: "agent-7", Method: "POST", Path: "/v1/runs/x/time:advance",
+		RequestID: "request-1", AgentID: "agent-7", Method: "POST", Path: "/v2/runs/x/time:advance",
 		Body: []byte(`{"minutes":5}`), ReceivedAt: receivedAt,
 	}); err != nil {
 		s.t.Fatal(err)

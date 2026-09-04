@@ -34,7 +34,7 @@ func TestRunSessionReplaysOnceAndAppliesSubsequentCommandsInMemory(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := session.Execute(ctx, simulation.AddProduct{ProductID: "p1", Name: "Product", PriceMinor: 100,
-		ViewProbabilityPPM: 1_000_000, PurchaseProbabilityPPM: 1_000_000}); err != nil {
+		ViewProbabilityPPM: 1_000_000}); err != nil {
 		t.Fatal(err)
 	}
 	_ = session.State()

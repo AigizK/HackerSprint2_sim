@@ -8,7 +8,6 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/persistence"
 	"github.com/aigizk/hackersprint2-sim/internal/persistence/journal"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
-	"github.com/aigizk/hackersprint2-sim/internal/simulation/generator"
 )
 
 func TestDebugQueryListsAllAgentsWithoutAdvancingRuns(t *testing.T) {
@@ -19,9 +18,7 @@ func TestDebugQueryListsAllAgentsWithoutAdvancingRuns(t *testing.T) {
 	}
 	defer storage.Close()
 	startsAt := time.Date(2032, 3, 1, 0, 0, 0, 0, time.UTC)
-	evaluation := generator.WorldEvaluation{MaximumBalanceMinor: 1_000_000, MaximumRevenueMinor: 900_000, MinimumServerCostMinor: 100_000, AgentRequestCount: 4,
-		AgentRequestDuration: 10 * time.Second, MinimumRealTime: 40 * time.Second}
-	if _, err := RegisterManualWorld(ctx, storage.Catalog, ManualWorldInput{Seed: -1, StartsAt: startsAt, EndsAt: startsAt.Add(time.Hour), Evaluation: evaluation}); err != nil {
+	if _, err := RegisterManualWorld(ctx, storage.Catalog, ManualWorldInput{Seed: -1, StartsAt: startsAt, EndsAt: startsAt.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	start := NewStartRunService(storage.Catalog, storage.Journal, nil, storage.Journal)
@@ -63,16 +60,10 @@ func TestDebugQueryListsAllAgentsWithoutAdvancingRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !debugOverview.HasBenchmark || debugOverview.Evaluation.MaximumBalanceMinor != 1_000_000 || debugOverview.MaximumProfitMinor != 800_000 ||
-		debugOverview.MinimumAvailability != MinimumAvailabilitySLO || debugOverview.SLOPassed ||
-		debugOverview.ActualAgentRequestCount != 1 || debugOverview.ActualModeledRealTime != 10*time.Second ||
-		debugOverview.ActualWallClockRealTime != 12*time.Second {
+	if debugOverview.ActualAgentRequestCount != 1 || debugOverview.ActualWallClockRealTime != 12*time.Second {
 		t.Fatalf("debug benchmark = %#v", debugOverview)
 	}
 	if _, _, err := query.Logs(ctx, runID, simulation.LogsQuery{Limit: 200}); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := query.Economy(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := simulation.OpenRunSession(ctx, storage.Journal, runID)
@@ -88,29 +79,5 @@ func TestDebugQueryListsAllAgentsWithoutAdvancingRuns(t *testing.T) {
 	}
 	if !record.LastRealRequestAt.Equal(recordBefore.LastRealRequestAt) || !record.UpdatedAt.Equal(recordBefore.UpdatedAt) {
 		t.Fatalf("debug read touched catalog: before=%#v after=%#v", recordBefore, record)
-	}
-}
-
-func TestRunScoreRequiresCompletedSLOAndUsesOperatingProfit(t *testing.T) {
-	economy := simulation.EconomyView{RevenueMinor: 1_000, ServerCostMinor: 200, DeploymentCostMinor: 50}
-	tests := []struct {
-		name         string
-		overview     simulation.OverviewView
-		availability float64
-		evaluated    bool
-		passed       bool
-	}{
-		{name: "passed", overview: simulation.OverviewView{RunStatus: "completed", VisitorRequestsTotal: 100, VisitorErrorRate: .04}, availability: .96, evaluated: true, passed: true},
-		{name: "below SLO", overview: simulation.OverviewView{RunStatus: "completed", VisitorRequestsTotal: 100, VisitorErrorRate: .06}, availability: .94, evaluated: true},
-		{name: "still running", overview: simulation.OverviewView{RunStatus: "running", VisitorRequestsTotal: 100, VisitorErrorRate: .01}, availability: .99},
-		{name: "no requests", overview: simulation.OverviewView{RunStatus: "completed"}, evaluated: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			availability, evaluated, passed, profit := runScoreFacts(test.overview, economy)
-			if availability != test.availability || evaluated != test.evaluated || passed != test.passed || profit != 750 {
-				t.Fatalf("score facts = availability=%v evaluated=%v passed=%v profit=%d", availability, evaluated, passed, profit)
-			}
-		})
 	}
 }

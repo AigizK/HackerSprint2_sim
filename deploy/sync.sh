@@ -17,17 +17,17 @@ ssh "${deploy_host}" "install -d -m 0755 '${remote_root}/bin' '${remote_root}/co
 
 rsync -az --checksum "${build_dir}/hackersprint2-sim" \
   "${deploy_host}:${remote_root}/bin/.hackersprint2-sim.new"
-rsync -az --checksum "${project_root}/config/world-generation.v1.yaml" \
-  "${deploy_host}:${remote_root}/config/.world-generation.v1.yaml.new"
+rsync -az --checksum "${project_root}/config/world-generation.v2.yaml" \
+  "${deploy_host}:${remote_root}/config/.world-generation.v2.yaml.new"
 rsync -az --checksum "${project_root}/deploy/hackersprint2-sim.service" \
   "${deploy_host}:${remote_root}/deploy/.hackersprint2-sim.service.new"
 
 ssh "${deploy_host}" "set -eu
 chmod 0755 '${remote_root}/bin/.hackersprint2-sim.new'
-chmod 0644 '${remote_root}/config/.world-generation.v1.yaml.new' '${remote_root}/deploy/.hackersprint2-sim.service.new'
-chown root:root '${remote_root}/bin/.hackersprint2-sim.new' '${remote_root}/config/.world-generation.v1.yaml.new' '${remote_root}/deploy/.hackersprint2-sim.service.new'
+chmod 0644 '${remote_root}/config/.world-generation.v2.yaml.new' '${remote_root}/deploy/.hackersprint2-sim.service.new'
+chown root:root '${remote_root}/bin/.hackersprint2-sim.new' '${remote_root}/config/.world-generation.v2.yaml.new' '${remote_root}/deploy/.hackersprint2-sim.service.new'
 mv -f '${remote_root}/bin/.hackersprint2-sim.new' '${remote_root}/bin/hackersprint2-sim'
-mv -f '${remote_root}/config/.world-generation.v1.yaml.new' '${remote_root}/config/world-generation.v1.yaml'
+mv -f '${remote_root}/config/.world-generation.v2.yaml.new' '${remote_root}/config/world-generation.v2.yaml'
 mv -f '${remote_root}/deploy/.hackersprint2-sim.service.new' '${remote_root}/deploy/hackersprint2-sim.service'
 "
 

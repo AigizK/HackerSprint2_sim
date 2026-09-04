@@ -1,6 +1,7 @@
 package spec_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
@@ -91,49 +92,14 @@ func TestAddingServerMakesCapacityAvailableAfterOverload(t *testing.T) {
 	)
 
 	afterScaleAt := worldStartsAt.Add(capacityHoldDuration)
+	wantEvents := append(
+		acceptedRequestEventsOnServer(afterScaleFirstRequestID, "visitor-4", 60, afterScaleAt, capacityServerID),
+		acceptedRequestEventsOnServer(afterScaleSecondRequestID, "visitor-5", 60, afterScaleAt, secondServerID)...,
+	)
+	wantEvents = append(wantEvents, events.BackendAvailabilityChanged{Available: false,
+		UnavailablePages: []model.PageType{model.PageProductList}, ChangedAt: afterScaleAt})
 	s.Then(
-		s.Events.Exactly(
-			events.PageRequestStarted{
-				RequestID: afterScaleFirstRequestID,
-				Source:    model.RequestSourceVisitor,
-				VisitorID: "visitor-4",
-				Page:      model.PageProductList,
-				LoadUnits: 60,
-				StartedAt: afterScaleAt,
-			},
-			events.PageRequestAccepted{
-				RequestID:  afterScaleFirstRequestID,
-				ServerID:   capacityServerID,
-				AcceptedAt: afterScaleAt,
-				ReleasesAt: afterScaleAt.Add(capacityHoldDuration),
-			},
-			events.PageRequestCompleted{
-				RequestID:   afterScaleFirstRequestID,
-				ServerID:    capacityServerID,
-				StatusCode:  200,
-				CompletedAt: afterScaleAt,
-			},
-			events.PageRequestStarted{
-				RequestID: afterScaleSecondRequestID,
-				Source:    model.RequestSourceVisitor,
-				VisitorID: "visitor-5",
-				Page:      model.PageProductList,
-				LoadUnits: 60,
-				StartedAt: afterScaleAt,
-			},
-			events.PageRequestAccepted{
-				RequestID:  afterScaleSecondRequestID,
-				ServerID:   secondServerID,
-				AcceptedAt: afterScaleAt,
-				ReleasesAt: afterScaleAt.Add(capacityHoldDuration),
-			},
-			events.PageRequestCompleted{
-				RequestID:   afterScaleSecondRequestID,
-				ServerID:    secondServerID,
-				StatusCode:  200,
-				CompletedAt: afterScaleAt,
-			},
-		),
+		s.Events.Exactly(wantEvents...),
 		s.Logs.Exactly(
 			capacityLog(firstRequestID, "visitor-1", worldStartsAt, 200, "", ""),
 			capacityLog(
@@ -212,15 +178,10 @@ func TestIdleServerIsRemovedImmediately(t *testing.T) {
 
 	s.Then(
 		s.Events.Exactly(
-			events.BackendScaleRequested{
-				CommandID:        removeCommandID,
-				OperationID:      removeOperationID,
-				DesiredInstances: 1,
-				RequestedAt:      worldStartsAt,
-			},
+			events.ServerCommandAccepted{CommandID: removeCommandID, OperationID: removeOperationID, Payload: fmt.Sprintf("server.delete:%s:%s", removeOperationID, secondServerID), AcceptedAt: worldStartsAt},
 			events.OperationQueued{
 				OperationID: removeOperationID,
-				Kind:        model.OperationScaleBackend,
+				Kind:        model.OperationControlCommand,
 				QueuedAt:    worldStartsAt,
 			},
 			events.OperationStarted{OperationID: removeOperationID, StartedAt: worldStartsAt},
@@ -247,15 +208,10 @@ func TestBusyServerIsRemovedOnlyAfterItsLoadIsReleased(t *testing.T) {
 
 	s.Then(
 		s.Events.Exactly(
-			events.BackendScaleRequested{
-				CommandID:        removeCommandID,
-				OperationID:      removeOperationID,
-				DesiredInstances: 1,
-				RequestedAt:      worldStartsAt,
-			},
+			events.ServerCommandAccepted{CommandID: removeCommandID, OperationID: removeOperationID, Payload: fmt.Sprintf("server.delete:%s:%s", removeOperationID, capacityServerID), AcceptedAt: worldStartsAt},
 			events.OperationQueued{
 				OperationID: removeOperationID,
-				Kind:        model.OperationScaleBackend,
+				Kind:        model.OperationControlCommand,
 				QueuedAt:    worldStartsAt,
 			},
 			events.OperationStarted{OperationID: removeOperationID, StartedAt: worldStartsAt},
@@ -305,15 +261,10 @@ func TestLastBackendServerCannotBeRemoved(t *testing.T) {
 
 func addServerEvents() []events.Event {
 	return []events.Event{
-		events.BackendScaleRequested{
-			CommandID:        addServerCommandID,
-			OperationID:      addServerOperationID,
-			DesiredInstances: 2,
-			RequestedAt:      worldStartsAt,
-		},
+		events.ServerCommandAccepted{CommandID: addServerCommandID, OperationID: addServerOperationID, Payload: fmt.Sprintf("server.create:%s:%s:%d:%d", addServerOperationID, secondServerID, capacityServerUnits, capacityCostPerHour), AcceptedAt: worldStartsAt},
 		events.OperationQueued{
 			OperationID: addServerOperationID,
-			Kind:        model.OperationScaleBackend,
+			Kind:        model.OperationControlCommand,
 			QueuedAt:    worldStartsAt,
 		},
 		events.OperationStarted{OperationID: addServerOperationID, StartedAt: worldStartsAt},

@@ -1,0 +1,158 @@
+version: world-generation.v2
+
+clock:
+  # A deterministic Monday-to-Monday week is selected from this full-year window for every seed.
+  starts_at: "2030-01-01T00:00:00Z"
+  ends_at: "2031-01-01T00:00:00Z"
+  timezone: Europe/Moscow
+  random_start_week: true
+  simulation_duration_days: 7
+
+traffic:
+  # Total VisitorArrived + scheduled scenario events for the week.
+  target_scheduled_events: 100000
+  # This is a relative weight. The generator normalizes hourly, weekday,
+  # holiday and noise weights to target_scheduled_events for the selected week.
+  base_arrivals_per_hour: 1
+  # Index is the local hour: 0 through 23.
+  hourly_multipliers_ppm:
+    [16000, 12000, 8000, 6400, 6400, 9600, 20000, 40000, 64000, 80000, 92000, 96000,
+     92000, 88000, 84000, 88000, 100000, 116000, 128000, 124000, 108000, 80000, 52000, 28000]
+  weekday_multipliers_ppm:
+    monday: 1000000
+    tuesday: 1000000
+    wednesday: 1020000
+    thursday: 1050000
+    friday: 1150000
+    saturday: 1250000
+    sunday: 1100000
+  special_days:
+    - id: march_8
+      rule: fixed_date
+      month: 3
+      day: 8
+      duration_hours: 24
+      traffic_multiplier_ppm: 1800000
+    - id: may_1
+      rule: fixed_date
+      month: 5
+      day: 1
+      duration_hours: 24
+      traffic_multiplier_ppm: 1350000
+    - id: september_1
+      rule: fixed_date
+      month: 9
+      day: 1
+      duration_hours: 24
+      traffic_multiplier_ppm: 1600000
+    - id: black_friday
+      rule: black_friday
+      duration_hours: 72
+      traffic_multiplier_ppm: 4000000
+  noise_multiplier:
+    min_ppm: 850000
+    max_ppm: 1200000
+  max_arrivals_per_hour: 1000000
+
+journey:
+  catalog_to_product_probability_ppm: 850000
+  catalog_to_product_delay_seconds:
+    min: 5
+    max: 180
+
+catalog:
+  product_count:
+    min: 20
+    max: 50
+  price_minor:
+    min: 50000
+    max: 5000000
+  popularity_weight:
+    min: 1
+    max: 100
+  name_templates:
+    - Coffee machine
+    - Smartphone
+    - Laptop
+    - Headphones
+    - Robot vacuum
+    - Gaming monitor
+    - Smart watch
+    - Air purifier
+
+infrastructure:
+  initial_backend_instances: 1
+  min_backend_instances: 1
+  max_backend_instances: 50
+  server_capacity_units: 100
+  server_cost_per_hour_minor: 25700000
+  server_provisioning_seconds: 300
+  server_graceful_drain_seconds: 600
+  database_disk_x_bytes: 10737418240
+  initial_database_data_bytes: 2147483648
+  initial_database_logs_bytes: 1073741824
+  database_growth_events: 24
+  # Even after every log is cleaned, this weekly real-data growth cannot fit on db.small.
+  # It does fit on db.medium/db.large, making a lossless migration the required solution.
+  database_growth_data_bytes: {min: 402653184, max: 469762048}
+  database_growth_logs_bytes: {min: 67108864, max: 134217728}
+  # The initial backend receives ten separate +1 GiB log-growth events. Without
+  # cleanup its 10 GiB disk fills completely and requests start returning DISK_FULL.
+  backend_log_growth_events: 10
+  backend_log_growth_bytes: {min: 1073741824, max: 1073741824}
+  # Up to thirteen ordinary visitors arrive together before any DDoS incident.
+  # The generator stops after their requests exceed one backend; the excess is
+  # bounded so that the same burst always fits on two.
+  backend_surge_visitors: 13
+  # This separate simultaneous cluster can exhaust db.small's 100 connections
+  # after the agent has added enough backends; db.medium and db.large absorb it.
+  database_connection_surge_visitors: 101
+  pages:
+    product_list:
+      load_units: {min: 8, max: 14}
+      resource_hold_seconds: {min: 2, max: 8}
+      base_latency_ms: {min: 40, max: 120}
+    product_page:
+      load_units: {min: 12, max: 22}
+      resource_hold_seconds: {min: 3, max: 12}
+      base_latency_ms: {min: 60, max: 180}
+ddos:
+  enabled: true
+  attack_count: {min: 4, max: 12}
+  target_page_weights:
+    product_list: 60
+    product_page: 30
+  kinds:
+    - id: camera_user_agent
+      weight: 1
+      resolution: scale_or_expiry
+      duration_seconds: {min: 1800, max: 14400}
+      requests_per_minute: {min: 1200, max: 2400}
+      load_units_per_request: {min: 3, max: 12}
+      source_cidr: 203.0.113.0/24
+      user_agent: CompromisedCamera/1.0
+      region_code: ZZ
+    - id: single_subnet
+      weight: 1
+      resolution: scale_or_expiry
+      duration_seconds: {min: 1800, max: 14400}
+      requests_per_minute: {min: 1200, max: 2400}
+      load_units_per_request: {min: 3, max: 12}
+      source_cidr: 198.51.100.0/24
+      user_agent: GenericBot/1.0
+      region_code: US
+
+credentials:
+  # Each generated week has credential changes. The issuance and inbox message
+  # happen at the scheduled simulation instant; the superseded password stops working.
+  rotation_events: 2
+  rotation_after_seconds: {min: 86400, max: 518400}
+
+costs:
+  currency: RUB
+  server_billing_period_seconds: 3600
+  server_billing_rounding: ceil
+
+limits:
+  max_scheduled_events: 10000000
+  max_visitors: 10000000

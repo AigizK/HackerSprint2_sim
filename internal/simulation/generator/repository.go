@@ -21,17 +21,16 @@ type WorldKey struct {
 }
 
 type WorldDefinition struct {
-	WorldID        string
-	Key            WorldKey
-	ProfileVersion string
-	ScheduleHash   string
-	Source         string
-	StartsAt       time.Time
-	EndsAt         time.Time
-	CreatedAt      time.Time
-	Evaluation     WorldEvaluation
-	Bootstrap      []events.Event
-	Events         events.EventSchedule
+	WorldID        string               `json:"world_id"`
+	Key            WorldKey             `json:"key"`
+	ProfileVersion string               `json:"profile_version"`
+	ScheduleHash   string               `json:"schedule_hash"`
+	Source         string               `json:"source"`
+	StartsAt       time.Time            `json:"starts_at"`
+	EndsAt         time.Time            `json:"ends_at"`
+	CreatedAt      time.Time            `json:"created_at"`
+	Bootstrap      []events.Event       `json:"bootstrap"`
+	Events         events.EventSchedule `json:"events"`
 }
 
 type WorldRepository interface {
@@ -59,7 +58,6 @@ func (r *MemoryWorldRepository) FindWorld(_ context.Context, key WorldKey) (Worl
 	// the deterministic generator and never trusted as persisted source data.
 	world.Events = nil
 	world.Bootstrap = nil
-	world.Evaluation.OptimalPlan = append([]OracleAction(nil), world.Evaluation.OptimalPlan...)
 	return world, nil
 }
 
@@ -71,7 +69,6 @@ func (r *MemoryWorldRepository) CreateWorld(_ context.Context, world WorldDefini
 	}
 	world.Events = append(events.EventSchedule(nil), world.Events...)
 	world.Bootstrap = append([]events.Event(nil), world.Bootstrap...)
-	world.Evaluation.OptimalPlan = append([]OracleAction(nil), world.Evaluation.OptimalPlan...)
 	r.worlds[world.Key] = world
 	return nil
 }

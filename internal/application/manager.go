@@ -261,7 +261,7 @@ func (m *RunManager) evictUnlocked(protected string) {
 func redactHeaders(headers map[string][]string) map[string][]string {
 	result := make(map[string][]string, len(headers))
 	for key, values := range headers {
-		if strings.EqualFold(key, "X-Agent-API-Key") {
+		if strings.EqualFold(key, "X-Agent-API-Key") || strings.EqualFold(key, "Authorization") {
 			result[key] = []string{"[REDACTED]"}
 			continue
 		}

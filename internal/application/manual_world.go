@@ -13,12 +13,11 @@ import (
 )
 
 type ManualWorldInput struct {
-	Seed       int64
-	StartsAt   time.Time
-	EndsAt     time.Time
-	Bootstrap  []events.Event
-	Events     events.EventSchedule
-	Evaluation generator.WorldEvaluation
+	Seed      int64
+	StartsAt  time.Time
+	EndsAt    time.Time
+	Bootstrap []events.Event
+	Events    events.EventSchedule
 }
 
 func RegisterManualWorld(ctx context.Context, catalog generator.WorldRepository, input ManualWorldInput) (generator.WorldDefinition, error) {
@@ -43,7 +42,7 @@ func RegisterManualWorld(ctx context.Context, catalog generator.WorldRepository,
 	world := generator.WorldDefinition{WorldID: "m" + hex.EncodeToString(digest[:16]),
 		Key:            generator.WorldKey{Seed: input.Seed, ProfileHash: "manual", GeneratorVersion: "manual.v1"},
 		ProfileVersion: "manual.v1", ScheduleHash: hash, Source: "manual", StartsAt: input.StartsAt.UTC(),
-		EndsAt: input.EndsAt.UTC(), CreatedAt: time.Now().UTC(), Evaluation: input.Evaluation,
+		EndsAt: input.EndsAt.UTC(), CreatedAt: time.Now().UTC(),
 		Bootstrap: append([]events.Event(nil), input.Bootstrap...), Events: append(events.EventSchedule(nil), input.Events...)}
 	if err := catalog.CreateWorld(ctx, world); err != nil {
 		return generator.WorldDefinition{}, err

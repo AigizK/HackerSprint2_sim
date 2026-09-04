@@ -17,7 +17,10 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
-const GeneratorVersion = "world-generator.v4"
+const (
+	GeneratorVersion       = "world-generator.v12"
+	generatorRandomVersion = "world-generator.v12"
+)
 
 var (
 	ErrGenerationLimit = errors.New("world generation limit exceeded")
@@ -27,7 +30,6 @@ var (
 type Generator struct {
 	profile     WorldGenerationProfile
 	profileHash string
-	evaluator   *WorldEvaluator
 }
 
 func New(profile WorldGenerationProfile) (*Generator, error) {
@@ -39,20 +41,11 @@ func New(profile WorldGenerationProfile) (*Generator, error) {
 		return nil, err
 	}
 	hash := sha256.Sum256(payload)
-	evaluator, err := NewWorldEvaluator(EvaluationConfig{
-		InitialBackendInstances: profile.Infrastructure.InitialBackendInstances,
-		ServerCapacityUnits:     profile.Infrastructure.ServerCapacityUnits,
-		ServerCostPerHourMinor:  profile.Infrastructure.ServerCostPerHourMinor,
-		ServerProvisioningTime:  time.Duration(profile.Infrastructure.ServerProvisioningSeconds) * time.Second,
-		AgentRequestDuration:    DefaultAgentRequestDuration,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &Generator{profile: profile, profileHash: hex.EncodeToString(hash[:]), evaluator: evaluator}, nil
+	return &Generator{profile: profile, profileHash: hex.EncodeToString(hash[:])}, nil
 }
 
-func (g *Generator) ProfileHash() string { return g.profileHash }
+func (g *Generator) ProfileHash() string             { return g.profileHash }
+func (g *Generator) Profile() WorldGenerationProfile { return g.profile }
 
 func (g *Generator) Key(seed int64) (WorldKey, error) {
 	if seed <= 0 {
@@ -66,18 +59,14 @@ func (g *Generator) Generate(seed int64) (WorldDefinition, error) {
 	if err != nil {
 		return WorldDefinition{}, err
 	}
-	random := deterministicRandom{seed: seed, generatorVersion: GeneratorVersion}
+	// This version starts a new read-only service world format.
+	random := deterministicRandom{seed: seed, generatorVersion: generatorRandomVersion}
 	startsAt, endsAt, err := g.worldClock(random)
 	if err != nil {
 		return WorldDefinition{}, err
 	}
 
-	bootstrap, products, bugs, err := g.generateBootstrap(random, startsAt)
-	if err != nil {
-		return WorldDefinition{}, err
-	}
-	_ = products
-	_ = bugs
+	bootstrap := g.generateBootstrap(random, startsAt)
 	schedule, err := g.generateSchedule(random, startsAt, endsAt)
 	if err != nil {
 		return WorldDefinition{}, err
@@ -93,29 +82,28 @@ func (g *Generator) Generate(seed int64) (WorldDefinition, error) {
 		StartsAt: startsAt, EndsAt: endsAt, CreatedAt: startsAt,
 		Bootstrap: bootstrap, Events: schedule,
 	}
-	world.Evaluation, err = g.evaluator.Evaluate(world)
-	if err != nil {
-		return WorldDefinition{}, err
-	}
 	return world, nil
 }
 
 func (g *Generator) worldClock(random deterministicRandom) (time.Time, time.Time, error) {
 	windowStart, _ := time.Parse(time.RFC3339, g.profile.Clock.StartsAt)
 	windowEnd, _ := time.Parse(time.RFC3339, g.profile.Clock.EndsAt)
-	durationMonths := g.profile.Clock.SimulationDurationMonths
-	startsAt := windowStart
-	if g.profile.Clock.RandomStartMonth {
-		candidates := make([]time.Time, 0, 12)
-		for candidate := windowStart; !candidate.AddDate(0, durationMonths, 0).After(windowEnd); candidate = candidate.AddDate(0, 1, 0) {
-			candidates = append(candidates, candidate)
-		}
-		if len(candidates) == 0 {
-			return time.Time{}, time.Time{}, fmt.Errorf("%w: no month fits clock selection window", ErrInvalidProfile)
-		}
-		startsAt = candidates[random.uint64("clock:start_month")%uint64(len(candidates))]
+	location, _ := time.LoadLocation(g.profile.Clock.Timezone)
+	duration := time.Duration(g.profile.Clock.SimulationDurationDays) * 24 * time.Hour
+	localStart := windowStart.In(location)
+	first := time.Date(localStart.Year(), localStart.Month(), localStart.Day(), 0, 0, 0, 0, location)
+	for first.Weekday() != time.Monday || first.UTC().Before(windowStart) {
+		first = first.AddDate(0, 0, 1)
 	}
-	return startsAt, startsAt.AddDate(0, durationMonths, 0), nil
+	candidates := make([]time.Time, 0, 53)
+	for candidate := first.UTC(); !candidate.Add(duration).After(windowEnd); candidate = candidate.AddDate(0, 0, 7) {
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		return time.Time{}, time.Time{}, fmt.Errorf("%w: no calendar week fits clock selection window", ErrInvalidProfile)
+	}
+	startsAt := candidates[random.uint64("clock:start_week")%uint64(len(candidates))]
+	return startsAt, startsAt.Add(duration), nil
 }
 
 func (g *Generator) GetOrCreate(ctx context.Context, repository WorldRepository, seed int64) (WorldDefinition, bool, error) {
@@ -173,166 +161,6 @@ func HashWorldEvents(bootstrap []events.Event, schedule events.EventSchedule) (s
 	return hashWorldEvents(bootstrap, schedule)
 }
 
-type generatedProduct struct {
-	id                  model.ProductID
-	price               int64
-	viewProbability     uint32
-	purchaseProbability uint32
-}
-
-type generatedBug struct {
-	id          model.BugID
-	probability uint32
-}
-
-func (g *Generator) generateBootstrap(random deterministicRandom, at time.Time) ([]events.Event, []generatedProduct, []generatedBug, error) {
-	result := make([]events.Event, 0)
-	pageStates := make(map[model.PageType]PageConfig)
-	for _, page := range []model.PageType{model.PageProductList, model.PageProduct, model.PagePurchase} {
-		config := g.profile.Infrastructure.Pages[string(page)]
-		load := random.int64Range(config.LoadUnits, "page:"+string(page)+":load")
-		hold := random.int64Range(config.ResourceHoldSeconds, "page:"+string(page)+":hold")
-		latency := random.int64Range(config.BaseLatencyMS, "page:"+string(page)+":latency")
-		pageStates[page] = PageConfig{LoadUnits: IntRange{Min: load, Max: load}, ResourceHoldSeconds: IntRange{Min: hold, Max: hold}}
-		result = append(result, events.PageConfigured{Page: page, LoadUnits: load, HoldDuration: time.Duration(hold) * time.Second, BaseLatency: time.Duration(latency) * time.Millisecond, ConfiguredAt: at})
-	}
-	result = append(result,
-		events.InfrastructureConfigured{ServerProvisioningDuration: time.Duration(g.profile.Infrastructure.ServerProvisioningSeconds) * time.Second, ConfiguredAt: at},
-		events.EconomyConfigured{Currency: g.profile.Economy.Currency, InitialBalanceMinor: g.profile.Economy.InitialBalanceMinor, StopRunOnNegativeBalance: g.profile.Economy.StopRunWhenBalanceIsNegative, ServerBillingPeriod: time.Duration(g.profile.Economy.ServerBillingPeriodSeconds) * time.Second, ConfiguredAt: at},
-	)
-	for index := 1; index <= g.profile.Infrastructure.InitialBackendInstances; index++ {
-		serverID := model.ServerID(fmt.Sprintf("server-initial-%d", index))
-		operationID := model.OperationID("initial-" + string(serverID))
-		result = append(result,
-			events.ServerProvisioningStarted{OperationID: operationID, ServerID: serverID, CapacityUnits: g.profile.Infrastructure.ServerCapacityUnits, CostPerHourMinor: g.profile.Infrastructure.ServerCostPerHourMinor, StartedAt: at, ReadyAt: at},
-			events.ServerActivated{OperationID: operationID, ServerID: serverID, ActivatedAt: at},
-		)
-	}
-
-	productCount := int(random.int64Range(g.profile.Catalog.ProductCount, "catalog:product_count"))
-	weights := make([]int64, productCount)
-	var totalWeight int64
-	for index := range weights {
-		weights[index] = random.int64Range(g.profile.Catalog.PopularityWeight, fmt.Sprintf("product:%d:popularity", index+1))
-		totalWeight += weights[index]
-	}
-	viewProbabilities := distributeProbability(g.profile.Journey.CatalogToProductProbabilityPPM, weights, totalWeight)
-	products := make([]generatedProduct, 0, productCount)
-	for index := 0; index < productCount; index++ {
-		number := index + 1
-		id := model.ProductID(fmt.Sprintf("product-%03d", number))
-		price := random.int64Range(g.profile.Catalog.PriceMinor, fmt.Sprintf("product:%d:price", number))
-		purchase := random.ppmRange(g.profile.Journey.ProductToPurchaseProbability, fmt.Sprintf("product:%d:purchase_probability", number))
-		name := g.profile.Catalog.NameTemplates[index%len(g.profile.Catalog.NameTemplates)] + fmt.Sprintf(" %03d", number)
-		products = append(products, generatedProduct{id: id, price: price, viewProbability: viewProbabilities[index], purchaseProbability: purchase})
-		result = append(result, events.ProductAdded{ProductID: id, Name: name, PriceMinor: price, ViewProbabilityPPM: viewProbabilities[index], PurchaseProbabilityPPM: purchase, AddedAt: at})
-	}
-
-	bugProducts := make([]int, 0, len(products))
-	remainingProducts := make([]int, 0, len(products))
-	for productIndex := range products {
-		if random.hit(g.profile.Bugs.ProductHasBugProbabilityPPM, fmt.Sprintf("product:%d:has_bug", productIndex+1)) {
-			bugProducts = append(bugProducts, productIndex)
-		} else {
-			remainingProducts = append(remainingProducts, productIndex)
-		}
-	}
-	sort.Slice(bugProducts, func(i, j int) bool {
-		return random.uint64(fmt.Sprintf("product:%d:bug_rank", bugProducts[i]+1)) < random.uint64(fmt.Sprintf("product:%d:bug_rank", bugProducts[j]+1))
-	})
-	sort.Slice(remainingProducts, func(i, j int) bool {
-		return random.uint64(fmt.Sprintf("product:%d:bug_rank", remainingProducts[i]+1)) < random.uint64(fmt.Sprintf("product:%d:bug_rank", remainingProducts[j]+1))
-	})
-	for int64(len(bugProducts)) < g.profile.Bugs.InitialBugCount.Min && len(remainingProducts) > 0 {
-		bugProducts = append(bugProducts, remainingProducts[0])
-		remainingProducts = remainingProducts[1:]
-	}
-	if int64(len(bugProducts)) > g.profile.Bugs.InitialBugCount.Max {
-		bugProducts = bugProducts[:g.profile.Bugs.InitialBugCount.Max]
-	}
-	bugs := make([]generatedBug, 0, len(bugProducts))
-	for bugOffset, productIndex := range bugProducts {
-		index := bugOffset + 1
-		id := model.BugID(fmt.Sprintf("bug-initial-%03d", index))
-		page := model.PageType(random.weighted(g.profile.Bugs.PageWeights, fmt.Sprintf("bug:%d:page", index)))
-		productID := model.ProductID("")
-		if page != model.PageProductList {
-			productID = products[productIndex].id
-		}
-		probability := random.ppmRange(g.profile.Bugs.TriggerProbability, fmt.Sprintf("bug:%d:trigger", index))
-		fixMessage := "FIX-" + strings.ToUpper(random.token(fmt.Sprintf("bug:%d:fix", index), g.profile.Bugs.FixTokenLength))
-		fixHash := sha256.Sum256([]byte(fixMessage))
-		bugs = append(bugs, generatedBug{id: id, probability: probability})
-		result = append(result, events.PageBugActivated{BugID: id, Page: page, ProductID: productID, FailureProbabilityPPM: probability, FixMessage: fixMessage, FixMessageHash: hex.EncodeToString(fixHash[:]), ActivatedAt: at})
-	}
-
-	deploymentEvents := g.generateDeployments(random, at, pageStates, products, bugs)
-	result = append(result, deploymentEvents...)
-	return result, products, bugs, nil
-}
-
-func (g *Generator) generateDeployments(random deterministicRandom, at time.Time, pages map[model.PageType]PageConfig, products []generatedProduct, bugs []generatedBug) []events.Event {
-	count := int(random.int64Range(g.profile.Deployments.Count, "deployments:count"))
-	result := make([]events.Event, 0)
-	for index := 1; index <= count; index++ {
-		deploymentID := model.DeploymentID(fmt.Sprintf("deployment-%03d", index))
-		result = append(result, events.DeploymentDefined{
-			DeploymentID: deploymentID, Sequence: index, Name: fmt.Sprintf("Generated deployment %03d", index), Description: fmt.Sprintf("Generated deployment %03d", index),
-			CostMinor:             random.int64Range(g.profile.Deployments.CostMinor, fmt.Sprintf("deployment:%d:cost", index)),
-			Duration:              time.Duration(random.int64Range(g.profile.Deployments.DurationSeconds, fmt.Sprintf("deployment:%d:duration", index))) * time.Second,
-			FailureProbabilityPPM: random.ppmRange(g.profile.Deployments.FailureProbability, fmt.Sprintf("deployment:%d:failure", index)), DefinedAt: at,
-		})
-		effectCount := int(random.int64Range(g.profile.Deployments.EffectsPerDeployment, fmt.Sprintf("deployment:%d:effect_count", index)))
-		for effectIndex := 0; effectIndex < effectCount; effectIndex++ {
-			namespace := fmt.Sprintf("deployment:%d:effect:%d", index, effectIndex+1)
-			switch effectIndex % 3 {
-			case 0:
-				page := model.PageType(random.weighted(g.profile.Deployments.NewBugPageWeights, namespace+":page"))
-				current := pages[page]
-				loadReduction := random.ppmRange(g.profile.Deployments.LoadReduction, namespace+":load_reduction")
-				holdReduction := random.ppmRange(g.profile.Deployments.RequestHoldReduction, namespace+":hold_reduction")
-				newLoad := maxInt64(1, current.LoadUnits.Min*int64(ProbabilityScale-loadReduction)/int64(ProbabilityScale))
-				newHold := maxInt64(1, current.ResourceHoldSeconds.Min*int64(ProbabilityScale-holdReduction)/int64(ProbabilityScale))
-				pages[page] = PageConfig{LoadUnits: IntRange{Min: newLoad, Max: newLoad}, ResourceHoldSeconds: IntRange{Min: newHold, Max: newHold}}
-				result = append(result, events.DeploymentPageLoadEffectDefined{DeploymentID: deploymentID, Page: page, NewLoadUnits: newLoad, NewHoldDuration: time.Duration(newHold) * time.Second, DefinedAt: at})
-			case 1:
-				reduction := random.ppmRange(g.profile.Deployments.FutureDeploymentDurationReduction, namespace+":duration_reduction")
-				result = append(result, events.DeploymentFutureDurationEffectDefined{DeploymentID: deploymentID, ReductionPPM: reduction, MinimumDuration: time.Duration(g.profile.Deployments.MinimumFutureDeploymentSeconds) * time.Second, DefinedAt: at})
-			case 2:
-				if len(bugs) > 0 {
-					bug := bugs[int(random.uint64(namespace+":bug")%uint64(len(bugs)))]
-					reduction := random.ppmRange(g.profile.Deployments.OldBugProbabilityReduction, namespace+":bug_reduction")
-					newProbability := uint32(uint64(bug.probability) * uint64(ProbabilityScale-reduction) / uint64(ProbabilityScale))
-					result = append(result, events.DeploymentBugProbabilityEffectDefined{DeploymentID: deploymentID, BugID: bug.id, NewProbabilityPPM: newProbability, DefinedAt: at})
-				}
-			}
-		}
-		if random.hit(g.profile.Deployments.NewBugProbabilityPPM, fmt.Sprintf("deployment:%d:new_bugs", index)) {
-			newBugCount := int(random.int64Range(g.profile.Deployments.NewBugCount, fmt.Sprintf("deployment:%d:new_bug_count", index)))
-			for bugIndex := 1; bugIndex <= newBugCount; bugIndex++ {
-				namespace := fmt.Sprintf("deployment:%d:new_bug:%d", index, bugIndex)
-				bugID := model.BugID(fmt.Sprintf("bug-deployment-%03d-%03d", index, bugIndex))
-				page := model.PageType(random.weighted(g.profile.Deployments.NewBugPageWeights, namespace+":page"))
-				productID := model.ProductID("")
-				if page != model.PageProductList {
-					productID = products[int(random.uint64(namespace+":product")%uint64(len(products)))].id
-				}
-				fixMessage := "FIX-" + strings.ToUpper(random.token(namespace+":fix", g.profile.Bugs.FixTokenLength))
-				fixHash := sha256.Sum256([]byte(fixMessage))
-				result = append(result, events.DeploymentNewBugEffectDefined{
-					DeploymentID: deploymentID, BugID: bugID, Page: page, ProductID: productID,
-					FailureProbabilityPPM: random.ppmRange(g.profile.Deployments.NewBugTriggerProbability, namespace+":trigger"),
-					FixMessage:            fixMessage, FixMessageHash: hex.EncodeToString(fixHash[:]), DefinedAt: at,
-				})
-			}
-		}
-	}
-	if count > 0 {
-		result = append(result, events.DeploymentUnlocked{DeploymentID: "deployment-001", UnlockedAt: at})
-	}
-	return result
-}
-
 func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsAt time.Time) (events.EventSchedule, error) {
 	location, _ := time.LoadLocation(g.profile.Clock.Timezone)
 	schedule := make(events.EventSchedule, 0)
@@ -341,7 +169,9 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 	if g.profile.DDoS.Enabled {
 		attackCount = int(random.int64Range(g.profile.DDoS.AttackCount, "ddos:count"))
 	}
-	visitorTarget := g.profile.Traffic.TargetScheduledEvents - int64(2*attackCount)
+	visitorTarget := g.profile.Traffic.TargetScheduledEvents - int64(2*attackCount) -
+		g.profile.Infrastructure.DatabaseGrowthEvents - g.profile.Infrastructure.BackendLogGrowthEvents -
+		g.profile.Credentials.RotationEvents
 	if visitorTarget <= 0 || visitorTarget > g.profile.Limits.MaxVisitors {
 		return nil, fmt.Errorf("%w: visitor target %d is outside limits", ErrGenerationLimit, visitorTarget)
 	}
@@ -392,6 +222,29 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 	for index := int64(0); index < remaining; index++ {
 		allocations[ranked[index]].count++
 	}
+	surgeHour := time.Time{}
+	clusteredVisitors := g.profile.Infrastructure.BackendSurgeVisitors + g.profile.Infrastructure.DatabaseConnectionSurgeVisitors
+	if clusteredVisitors > 0 {
+		// Keep this independent of generated DDoS attacks, whose window starts
+		// at +12h. A normal visitor burst demonstrates why a second backend is
+		// useful even when the firewall is not involved.
+		var surgeHourVisitors int64
+		for _, allocation := range allocations {
+			if !allocation.hour.Before(startsAt.Add(12*time.Hour)) || allocation.count < clusteredVisitors {
+				continue
+			}
+			if surgeHour.IsZero() || allocation.count > surgeHourVisitors {
+				surgeHour = allocation.hour
+				surgeHourVisitors = allocation.count
+			}
+		}
+		if surgeHour.IsZero() {
+			return nil, fmt.Errorf("%w: no first-half-day hour can host %d clustered visitors", ErrGenerationLimit, clusteredVisitors)
+		}
+	}
+	surgeLoad := int64(0)
+	listLoad := random.int64Range(g.profile.Infrastructure.Pages["product_list"].LoadUnits, "page:product_list:load")
+	productLoad := random.int64Range(g.profile.Infrastructure.Pages["product_page"].LoadUnits, "page:product_page:load")
 	for _, allocation := range allocations {
 		hour, count := allocation.hour, allocation.count
 		if count > g.profile.Traffic.MaxArrivalsPerHour {
@@ -403,17 +256,36 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 		hourVisitors := make(events.EventSchedule, 0, count)
 		for index := int64(0); index < count; index++ {
 			namespace := fmt.Sprintf("traffic:%s:visitor:%d", hour.Format(time.RFC3339), index)
+			visitorID := model.VisitorID("v" + random.token(namespace+":id", 24))
 			offset := time.Duration(random.uint64(namespace+":offset") % uint64(time.Hour))
+			if allocation.hour.Equal(surgeHour) && index < g.profile.Infrastructure.BackendSurgeVisitors && surgeLoad <= g.profile.Infrastructure.ServerCapacityUnits {
+				offset = 30 * time.Minute
+				surgeLoad += listLoad
+				if deterministicVisitorRoll(random.seed, visitorID, "product") < g.profile.Journey.CatalogToProductProbabilityPPM {
+					surgeLoad += productLoad
+				}
+			}
+			if allocation.hour.Equal(surgeHour) && index >= g.profile.Infrastructure.BackendSurgeVisitors && index < clusteredVisitors {
+				offset = 45 * time.Minute
+			}
 			arrivedAt := hour.Add(offset)
 			if arrivedAt.Before(startsAt) || !arrivedAt.Before(endsAt) {
 				continue
 			}
-			visitorID := model.VisitorID("v" + random.token(namespace+":id", 24))
-			hourVisitors = append(hourVisitors, events.ScheduledWorldEvent{OccursAt: arrivedAt, Event: events.VisitorArrived{VisitorID: visitorID, ArrivedAt: arrivedAt}})
+			regions := [...]model.RegionCode{"RU", "US", "KZ", "DE", "ZZ"}
+			agents := [...]string{"Mozilla/5.0 SimBrowser/1.0", "MobileApp/2.0", "WebCamera/1.0"}
+			sourceIP := fmt.Sprintf("198.18.%d.%d", random.uint64(namespace+":ip-subnet")%256, 1+random.uint64(namespace+":ip-host")%254)
+			hourVisitors = append(hourVisitors, events.ScheduledWorldEvent{OccursAt: arrivedAt, Event: events.VisitorArrived{
+				VisitorID: visitorID, SourceIP: sourceIP,
+				UserAgent:  agents[random.uint64(namespace+":user-agent")%uint64(len(agents))],
+				RegionCode: regions[random.uint64(namespace+":region")%uint64(len(regions))], ArrivedAt: arrivedAt}})
 			visitorCount++
 		}
 		sort.Slice(hourVisitors, func(i, j int) bool { return scheduledBefore(hourVisitors[i], hourVisitors[j]) })
 		schedule = append(schedule, hourVisitors...)
+	}
+	if !surgeHour.IsZero() && surgeLoad <= g.profile.Infrastructure.ServerCapacityUnits {
+		return nil, fmt.Errorf("%w: generated backend surge uses only %d of %d capacity units", ErrGenerationLimit, surgeLoad, g.profile.Infrastructure.ServerCapacityUnits)
 	}
 	incidents := make(events.EventSchedule, 0, 2*attackCount)
 	if g.profile.DDoS.Enabled {
@@ -421,31 +293,63 @@ func (g *Generator) generateSchedule(random deterministicRandom, startsAt, endsA
 			namespace := fmt.Sprintf("ddos:%d", index)
 			kind := g.profile.DDoS.Kinds[random.weightedKind(g.profile.DDoS.Kinds, namespace+":kind")]
 			duration := time.Duration(random.int64Range(kind.DurationSeconds, namespace+":duration")) * time.Second
-			available := endsAt.Sub(startsAt) - duration
+			attackWindowStart := startsAt.Add(12 * time.Hour)
+			available := endsAt.Sub(attackWindowStart) - duration
 			if available <= 0 {
 				return nil, fmt.Errorf("%w: DDoS duration exceeds world", ErrInvalidProfile)
 			}
-			startedAt := startsAt.Add(time.Duration(random.uint64(namespace+":start") % uint64(available)))
+			startedAt := attackWindowStart.Add(time.Duration(random.uint64(namespace+":start") % uint64(available)))
 			endedAt := startedAt.Add(duration)
 			attackID := model.AttackID(fmt.Sprintf("attack-%03d-%s", index, kind.ID))
-			fixMessage, fixHash := "", ""
-			if kind.Resolution == string(model.AttackFixOrExpiry) {
-				fixMessage = "MITIGATE-" + strings.ToUpper(random.token(namespace+":fix", kind.FixTokenLength))
-				hash := sha256.Sum256([]byte(fixMessage))
-				fixHash = hex.EncodeToString(hash[:])
-			}
 			page := model.PageType(random.weighted(g.profile.DDoS.TargetPageWeights, namespace+":page"))
 			incidents = append(incidents,
 				events.ScheduledWorldEvent{OccursAt: startedAt, Event: events.TrafficAttackStarted{
 					AttackID: attackID, Kind: model.AttackDDoS, TargetPage: page,
 					RequestsPerMinute:   random.int64Range(kind.RequestsPerMinute, namespace+":rpm"),
 					LoadUnitsPerRequest: random.int64Range(kind.LoadUnitsPerRequest, namespace+":load"),
+					SourceCIDR:          kind.SourceCIDR,
+					UserAgent:           kind.UserAgent,
+					RegionCode:          model.RegionCode(kind.RegionCode),
 					Resolution:          model.AttackResolution(kind.Resolution), ExpectedEndAt: endedAt,
-					FixMessage: fixMessage, FixMessageHash: fixHash, StartedAt: startedAt,
+					StartedAt: startedAt,
 				}},
 				events.ScheduledWorldEvent{OccursAt: endedAt, Event: events.TrafficAttackEnded{AttackID: attackID, EndedAt: endedAt}},
 			)
 		}
+	}
+	for index := int64(1); index <= g.profile.Infrastructure.DatabaseGrowthEvents; index++ {
+		namespace := fmt.Sprintf("database:growth:%d", index)
+		growthWindowStart := startsAt.Add(12 * time.Hour)
+		growthWindow := 60 * time.Hour
+		occursAt := growthWindowStart.Add(time.Duration(random.uint64(namespace+":at") % uint64(growthWindow)))
+		dataBytes := random.int64Range(g.profile.Infrastructure.DatabaseGrowthDataBytes, namespace+":data")
+		logsBytes := random.int64Range(g.profile.Infrastructure.DatabaseGrowthLogsBytes, namespace+":logs")
+		incidents = append(incidents, events.ScheduledWorldEvent{OccursAt: occursAt, Event: events.DatabaseGrowthRequested{
+			GrowthID: model.GrowthID(fmt.Sprintf("database-growth-%03d", index)), DataDeltaBytes: dataBytes, LogsDeltaBytes: logsBytes, RequestedAt: occursAt,
+		}})
+	}
+	for index := int64(1); index <= g.profile.Infrastructure.BackendLogGrowthEvents; index++ {
+		namespace := fmt.Sprintf("backend:logs:%d", index)
+		growthWindowStart := startsAt.Add(6 * time.Hour)
+		growthWindow := 60 * time.Hour
+		occursAt := growthWindowStart.Add(time.Duration(random.uint64(namespace+":at") % uint64(growthWindow)))
+		incidents = append(incidents, events.ScheduledWorldEvent{OccursAt: occursAt, Event: events.DiskLogsGrowthRequested{
+			GrowthID: model.GrowthID(fmt.Sprintf("backend-logs-growth-%03d", index)), ServerID: "server-initial-1",
+			DeltaBytes: random.int64Range(g.profile.Infrastructure.BackendLogGrowthBytes, namespace+":bytes"), RequestedAt: occursAt,
+		}})
+	}
+	rotationTargets := make([]model.ServerID, 0, g.profile.Infrastructure.InitialBackendInstances+1)
+	for index := 1; index <= g.profile.Infrastructure.InitialBackendInstances; index++ {
+		rotationTargets = append(rotationTargets, model.ServerID(fmt.Sprintf("server-initial-%d", index)))
+	}
+	rotationTargets = append(rotationTargets, model.ServerID("db-server-initial"))
+	for index := int64(1); index <= g.profile.Credentials.RotationEvents; index++ {
+		namespace := fmt.Sprintf("credentials:rotation:%d", index)
+		occursAt := startsAt.Add(time.Duration(random.int64Range(g.profile.Credentials.RotationAfterSeconds, namespace+":at")) * time.Second)
+		incidents = append(incidents, events.ScheduledWorldEvent{OccursAt: occursAt, Event: events.ServerCredentialRotationRequested{
+			RotationID: fmt.Sprintf("credential-rotation-%03d", index),
+			ServerID:   rotationTargets[(index-1)%int64(len(rotationTargets))], RequestedAt: occursAt,
+		}})
 	}
 	sort.SliceStable(incidents, func(i, j int) bool { return scheduledBefore(incidents[i], incidents[j]) })
 	if len(incidents) > 0 {
@@ -488,6 +392,11 @@ func scheduledBefore(left, right events.ScheduledWorldEvent) bool {
 	return string(leftPayload) < string(rightPayload)
 }
 
+func deterministicVisitorRoll(seed int64, visitorID model.VisitorID, step string) uint32 {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", seed, visitorID, step)))
+	return uint32(binary.BigEndian.Uint64(digest[:8]) % uint64(ProbabilityScale))
+}
+
 type deterministicRandom struct {
 	seed             int64
 	generatorVersion string
@@ -508,9 +417,6 @@ func (r deterministicRandom) ppmRange(value PPMRange, namespace string) uint32 {
 		return value.Min
 	}
 	return value.Min + uint32(r.uint64(namespace)%uint64(value.Max-value.Min+1))
-}
-func (r deterministicRandom) hit(probability uint32, namespace string) bool {
-	return probability >= ProbabilityScale || uint32(r.uint64(namespace)%uint64(ProbabilityScale)) < probability
 }
 func (r deterministicRandom) token(namespace string, length int) string {
 	result := ""
@@ -570,12 +476,6 @@ func distributeProbability(total uint32, weights []int64, totalWeight int64) []u
 func scaleFixedPPM(value int64, multiplier uint32) int64 {
 	scale := int64(ProbabilityScale)
 	return value/scale*int64(multiplier) + value%scale*int64(multiplier)/scale
-}
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 func specialDayMultiplier(days []SpecialDayConfig, local time.Time) uint32 {
 	result := uint32(ProbabilityScale)

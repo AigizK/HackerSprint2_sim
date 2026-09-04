@@ -19,30 +19,28 @@ type OverviewView struct {
 	Remaining            time.Duration
 	RunStatus            string
 	SiteStatus           string
-	CurrentDeploymentID  model.DeploymentID
 	ServerCount          int
 	CapacityUtilization  float64
 	ErrorRate            float64
 	VisitorRequestsTotal uint64
 	VisitorErrorRate     float64
-	BalanceMinor         int64
+	Uptime               float64
 }
 
 type MetricSnapshotView struct {
-	ServerCount         int
-	CapacityUnits       int64
-	UsedLoadUnits       int64
-	ActiveRequests      int
-	Responses200        uint64
-	Responses500        uint64
-	ErrorRate           float64
-	LatencyP50          time.Duration
-	LatencyP95          time.Duration
-	SuccessfulPurchases uint64
-	RevenueMinor        int64
-	LostRevenueMinor    int64
-	ServerCostMinor     int64
-	ByPage              []PageMetricView
+	ServerCount     int
+	CapacityUnits   int64
+	UsedLoadUnits   int64
+	ActiveRequests  int
+	Responses200    uint64
+	Responses403    uint64
+	Responses500    uint64
+	Responses503    uint64
+	ErrorRate       float64
+	LatencyP50      time.Duration
+	LatencyP95      time.Duration
+	ServerCostMinor int64
+	ByPage          []PageMetricView
 }
 
 type PageMetricView struct {
@@ -50,7 +48,9 @@ type PageMetricView struct {
 	ActiveRequests int
 	UsedLoadUnits  int64
 	Responses200   uint64
+	Responses403   uint64
 	Responses500   uint64
+	Responses503   uint64
 	ErrorRate      float64
 }
 
@@ -104,22 +104,11 @@ type ServerResourceView struct {
 }
 
 type ResourcesView struct {
-	DesiredInstances      int
 	ActiveInstances       int
 	TotalCapacityUnits    int64
 	UsedLoadUnits         int64
 	TotalCostPerHourMinor int64
 	Servers               []ServerResourceView
-}
-
-type EconomyView struct {
-	SuccessfulPurchases uint64
-	LostPurchases       uint64
-	RevenueMinor        int64
-	LostRevenueMinor    int64
-	ServerCostMinor     int64
-	DeploymentCostMinor int64
-	BalanceMinor        int64
 }
 
 type OperationView struct {
@@ -141,7 +130,6 @@ type FutureDriver interface {
 	Metrics(runID string, query MetricsQuery) (MetricsView, error)
 	Logs(runID string, query LogsQuery) (LogsView, error)
 	Resources(runID string) (ResourcesView, error)
-	Economy(runID string) (EconomyView, error)
 	Operation(runID string, operationID model.OperationID) (OperationView, error)
 }
 
@@ -230,12 +218,6 @@ func (d FutureDSL) Logs(query LogsQuery, want LogsView) Assertion {
 func (d FutureDSL) Resources(want ResourcesView) Assertion {
 	return d.equals("resources", want, func(driver FutureDriver, runID string) (any, error) {
 		return driver.Resources(runID)
-	})
-}
-
-func (d FutureDSL) Economy(want EconomyView) Assertion {
-	return d.equals("economy", want, func(driver FutureDriver, runID string) (any, error) {
-		return driver.Economy(runID)
 	})
 }
 

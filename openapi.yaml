@@ -1,26 +1,52 @@
 openapi: 3.1.1
 info:
-  title: E-commerce Simulation Agent API
-  version: 0.1.0
+  title: SRE Service Simulation Agent API
+  version: 0.5.0
   license:
     name: UNLICENSED
     identifier: LicenseRef-Proprietary
-  summary: API для агента, управляющего интернет-магазином в симуляции
+  summary: Uptime сервиса не ниже 99% при минимальной стоимости инфраструктуры
   description: |
     Публичный HTTP API для запуска детерминированной симуляции и управления
-    интернет-магазином от имени агента.
+    инфраструктурой веб-сервиса от имени SRE-агента.
 
-    В симуляции есть три типа страниц:
+    Это целевой контракт инфраструктурного API; наличие описания команды не
+    означает, что её обработчик уже реализован в текущей версии сервера.
 
-    1. `product_list` — список товаров;
-    2. `product_page` — страница конкретного товара;
-    3. `purchase` — страница покупки. Успешный вызов этой страницы означает покупку.
+    В симуляции есть две read-only страницы:
+    1. product_list — просмотр каталога;
+    2. product_page — просмотр конкретного товара.
+    Создание заказов, продажи и доходы не моделируются.
 
-    Каждый запрос посетителя создаёт нагрузку в условных единицах на заданное
-    время и оставляет запись в site logs со статусом 200 или 500. Серверы имеют
-    ограниченную capacity и стоят денег. Агент может наблюдать метрики и логи,
-    изменять число серверов, применять fixes, запускать подготовленные deployments,
-    выполнять deployments строго по очереди и явно прокручивать время.
+    Цель: завершить весь run с uptime_ratio >= 0.99, затем минимизировать
+    total_cost_minor среди запусков, прошедших SLO. Доступность выше порога
+    сама по себе не даёт преимущества перед более дешёвым успешным run.
+    Незавершённый run и run ниже порога не проходят SLO независимо от расходов.
+
+    Uptime — доля симуляционного времени доступности, не доля HTTP 200:
+    uptime_ratio = available_seconds / observed_seconds, где observed_seconds =
+    available_seconds + downtime_seconds. Внутренний детерминированный контроль
+    проверяет возможность обслужить read-only страницы для заданных легитимных
+    IP/region/user-agent через firewall, backend и БД, не создавая дополнительную
+    нагрузку. Если хотя бы одна требуемая проверка не проходит, интервал считается
+    простоем. Учитывается всё время run, в том числе без посетителей, а также
+    остановка сайта и блокировка легитимного доступа. Probes агента и запросы
+    ботов сами по себе не определяют uptime, но их нагрузка влияет на доступность.
+
+    Каждый входящий запрос сайта имеет source_ip, user_agent и region_code.
+    Логи содержат обычный и атакующий трафик без публичного признака атаки.
+    Firewall может отклонить запрос до backend и БД; остальные запросы создают
+    нагрузку на оба компонента. Статусы страниц: 200, 403, 500 или 503.
+    error_rate и счётчики ответов — диагностика трафика, а не формула SLO.
+
+    Агент наблюдает метрики и логи, управляет серверами, firewall, БД и дисками
+    через 18 типизированных команд панели и прокручивает время. Выделенные
+    серверы и внешнее хранение бэкапов оплачиваются по симуляционному времени,
+    в том числе при остановленном сайте. Удаление ресурса прекращает будущие
+    начисления, но не уменьшает уже понесённые расходы. Нет стартового баланса,
+    доходов или банкротства. overview показывает uptime, SLO и разбивку затрат;
+    metrics возвращает их числовые значения. Отдельные игровые fixes и очередь
+    deployments не входят в текущий контракт.
 
     `seed < 0` обозначает заранее созданный вручную мир. Он обязан существовать в
     базе данных. `seed > 0` обозначает генерируемый мир: сервер использует уже
@@ -37,7 +63,22 @@ info:
     запросить продвижение менее чем на 300 секунд нельзя.
 
     `agent_id` и `agent_version` используются для атрибуции и фильтрации запусков.
-    Эта игровая версия API не выполняет аутентификацию агента.
+    Эта игровая версия API не выполняет аутентификацию самого агента.
+    Панель и источник credentials требуют ControlPanelBasicAuth. Начальный
+    логин и пароль панели возвращает POST /v2/start в control_panel_auth вместе
+    с инструкцией использовать HTTP Basic Auth и полным COMMANDS.md в
+    commands_markdown. Inbox остаётся доступен без авторизации и содержит
+    серверные credentials либо ссылки на них.
+    Команды обращения внутрь серверов дополнительно требуют target_auth.
+    Это игровые секреты текущего run, а не реальные credentials инфраструктуры.
+
+    Все 18 инфраструктурных команд выполняются через POST /control/commands.
+    GET того же пути возвращает каталог команд и JSON Schema параметров.
+    server.create/delete работают с ролями backend и database; backend.scale
+    отсутствует. БД переносится после подтверждённой остановки всего сайта:
+    site.stop → database.backup → database.restore → site.database.set → site.start.
+    Новый сервер и пустую БД можно подготовить до остановки. Длительные операции
+    необходимо дождаться через GET /operations/{operation_id}.
 
 servers:
   - url: /
@@ -52,17 +93,19 @@ tags:
     description: Состояние сайта, метрики и логи
   - name: Resources
     description: Серверы и их capacity
-  - name: Fixes
-    description: Применение fixes, найденных в логах
-  - name: Deployments
-    description: Доступные и запущенные deployments
   - name: Probes
     description: Синтетические проверки страниц
   - name: Time
     description: Явное продвижение симуляционного времени
+  - name: Inbox
+    description: Доставленные агенту сообщения и текстовые задачи
+  - name: Control panel
+    description: Типизированные команды управления инфраструктурой
+  - name: Credentials
+    description: Отдельный источник игровых credentials серверов текущего run
 
 paths:
-  /v1/start:
+  /v2/start:
     post:
       tags: [Run lifecycle]
       operationId: startRun
@@ -74,6 +117,15 @@ paths:
         положительного seed отсутствующий мир генерируется детерминированно.
         Повтор с теми же `agent_id`, `agent_version` и `request_id` возвращает
         ранее созданный run и не создаёт новый.
+
+        Ответ содержит полный текст COMMANDS.md в commands_markdown и логин/пароль
+        панели в control_panel_auth с инструкцией использовать HTTP Basic Auth.
+        Credentials случайны, не зависят от seed и принадлежат только этому run.
+        Идемпотентный повтор, включая повтор после перезапуска сервера, возвращает
+        ту же пару. Ответ не должен кешироваться. Доступ самого агента не проверяется.
+        Панель, все 18 типизированных команд и источник серверных credentials
+        реализованы согласно этому контракту.
+      security: []
       requestBody:
         required: true
         content:
@@ -98,12 +150,22 @@ paths:
       responses:
         '201':
           description: Новый run создан
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/StartRunResponse'
         '200':
           description: Идемпотентный повтор; возвращён ранее созданный run
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
           content:
             application/json:
               schema:
@@ -122,11 +184,16 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/overview:
+  /v2/runs/{run_id}/overview:
     get:
       tags: [Observability]
       operationId: getOverview
-      summary: Получить общее состояние запуска
+      summary: Получить состояние сервиса, uptime и расходы
+      description: |
+        Возвращает доступность по времени с целевым uptime 99% и накопленные
+        затраты. slo_passed остаётся null до завершения run; окончательный успех
+        требует completed и uptime_ratio >= 0.99 без округления до целых процентов.
+        Среди успешных запусков одного мира меньшее costs.total_cost_minor лучше.
       parameters:
         - $ref: '#/components/parameters/RunId'
       responses:
@@ -141,7 +208,7 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/metrics:
+  /v2/runs/{run_id}/metrics:
     get:
       tags: [Observability]
       operationId: getMetrics
@@ -149,6 +216,11 @@ paths:
       description: |
         Без `from` и `to` возвращает текущий snapshot. Для запроса за период
         следует передать оба параметра. `names` ограничивает набор метрик.
+        uptime и расходы являются накопленными с начала run; точки series
+        показывают эти накопленные значения на свой timestamp, не только прирост
+        за запрошенное окно. Они не зависят от фильтра page. error_rate — отдельная
+        диагностическая метрика, не формула uptime. При нулевом времени наблюдения
+        uptime_ratio в snapshot равен null, а соответствующая точка series отсутствует.
       parameters:
         - $ref: '#/components/parameters/RunId'
         - $ref: '#/components/parameters/From'
@@ -188,15 +260,19 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/logs:
+  /v2/runs/{run_id}/logs:
     get:
       tags: [Observability]
       operationId: getSiteLogs
       summary: Получить site logs
       description: |
-        Возвращает логи уже произошедших запросов посетителей и probes. Логи могут
-        содержать сообщение с fix-текстом для активного бага. Audit log вызовов
-        самого агента этим endpoint не возвращается.
+        Возвращает логи уже произошедших входящих запросов сайта и probes,
+        включая заблокированные firewall и запросы во время остановки сайта.
+        source_ip, user_agent и region_code относятся к моделируемому трафику,
+        не к HTTP-клиенту панели. Логи не раскрывают, какой запрос является атакой.
+        Условия фильтров соединяются AND. Логи содержат диагностические сообщения;
+        audit log агента здесь не возвращается. disk.cleanup меняет только
+        счётчик диска и не удаляет эту историю запросов.
       parameters:
         - $ref: '#/components/parameters/RunId'
         - $ref: '#/components/parameters/From'
@@ -209,8 +285,40 @@ paths:
         - name: status
           in: query
           schema:
-            type: integer
-            enum: [200, 500]
+            $ref: '#/components/schemas/PageRequestStatus'
+        - name: has_error
+          in: query
+          description: Ограничить выборку запросами с инфраструктурной ошибкой или без неё
+          schema:
+            type: boolean
+        - name: error
+          in: query
+          description: Фильтр по точному инфраструктурному коду ошибки; несовместим с has_error=false
+          schema:
+            $ref: '#/components/schemas/RequestFailureCode'
+        - name: source_ip
+          in: query
+          schema:
+            $ref: '#/components/schemas/IPAddress'
+        - name: source_cidr
+          in: query
+          schema:
+            $ref: '#/components/schemas/NetworkCIDR'
+        - name: user_agent
+          in: query
+          description: Подстрока user-agent; регистр учитывается
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 2048
+        - name: region_code
+          in: query
+          schema:
+            $ref: '#/components/schemas/RegionCode'
+        - name: firewall_rule_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/ResourceId'
         - name: limit
           in: query
           schema:
@@ -232,7 +340,7 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/resources:
+  /v2/runs/{run_id}/resources:
     get:
       tags: [Resources]
       operationId: getResources
@@ -251,149 +359,9 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/resources/backend:
-    put:
-      tags: [Resources]
-      operationId: setBackendServerCount
-      summary: Установить желаемое количество backend-серверов
-      description: |
-        Идемпотентно задаёт desired instance count. Добавление и удаление серверов
-        может выполняться асинхронно. Сервер с активными запросами сначала переходит
-        в `draining`. Стоимость начисляется по симуляционному времени.
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ScaleBackendRequest'
-            example:
-              request_id: scale-20260824-001
-              desired_instances: 4
-      responses:
-        '202':
-          description: Изменение количества серверов принято
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationAcceptedResponse'
-        '200':
-          description: Желаемое состояние уже достигнуто или возвращён результат идемпотентного повтора
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationAcceptedResponse'
-        '400':
-          $ref: '#/components/responses/InvalidRequest'
-        '404':
-          $ref: '#/components/responses/RunNotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  /v1/runs/{run_id}/fixes:
-    post:
-      tags: [Fixes]
-      operationId: applyFix
-      summary: Применить fix по тексту из site logs
-      description: |
-        Если `message` совпадает с fix-текстом активного бага или DDoS-события,
-        требующего mitigation, причина ошибки полностью деактивируется. Повтор с
-        тем же `request_id` возвращает исходный результат.
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApplyFixRequest'
-            example:
-              request_id: fix-20260824-001
-              message: FIX-7F92A
-      responses:
-        '200':
-          description: Fix проверен и, при совпадении, применён
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApplyFixResponse'
-        '400':
-          $ref: '#/components/responses/InvalidRequest'
-        '404':
-          $ref: '#/components/responses/RunNotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  /v1/runs/{run_id}/deployments:
+  /v2/runs/{run_id}/operations/{operation_id}:
     get:
-      tags: [Deployments]
-      operationId: getDeployments
-      summary: Получить упорядоченную очередь deployments
-      description: |
-        Deployments являются последовательными задачами агента. Запустить можно
-        только первый незавершённый deployment со статусом `available`; последующие
-        имеют статус `locked`. Скрытые эффекты и будущие баги не раскрываются.
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      responses:
-        '200':
-          description: Список deployments
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DeploymentsResponse'
-        '404':
-          $ref: '#/components/responses/RunNotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-    post:
-      tags: [Deployments]
-      operationId: startDeployment
-      summary: Запустить подготовленный deployment
-      description: |
-        Deployment может изменить нагрузку страниц, время удержания ресурсов,
-        вероятность ошибок или активировать/деактивировать баги. В запросе передаётся
-        только ID подготовленного deployment, а не произвольный код. Запрос
-        deployment не по очереди отклоняется с `DEPLOYMENT_ORDER_VIOLATION`.
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/StartDeploymentRequest'
-            example:
-              request_id: deploy-20260824-001
-              deployment_id: catalog-cache-v1
-      responses:
-        '202':
-          description: Deployment принят к выполнению
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationAcceptedResponse'
-        '200':
-          description: Результат идемпотентного повтора
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OperationAcceptedResponse'
-        '400':
-          $ref: '#/components/responses/InvalidRequest'
-        '404':
-          description: Run или deployment не найден
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  /v1/runs/{run_id}/operations/{operation_id}:
-    get:
-      tags: [Resources, Deployments]
+      tags: [Control panel]
       operationId: getOperation
       summary: Получить статус длительной операции
       parameters:
@@ -415,12 +383,17 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/probes:
+  /v2/runs/{run_id}/probes:
     post:
       tags: [Probes]
       operationId: probePage
       summary: Выполнить синтетический запрос к странице
-      description: Probe создаёт обычную нагрузку и запись в site logs.
+      description: |
+        Probe проходит через firewall и состояние сайта, создаёт обычную нагрузку
+        на backend и БД и запись в site logs. source_ip, user_agent и region_code
+        назначаются симулятором детерминированно и возвращаются в результате.
+        HTTP 200 endpoint означает, что probe выполнен; поле status содержит
+        фактический статус страницы, включая отказ firewall или остановку сайта.
       parameters:
         - $ref: '#/components/parameters/RunId'
       requestBody:
@@ -453,29 +426,262 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/economy:
+  /v2/runs/{run_id}/inbox:
     get:
-      tags: [Observability]
-      operationId: getEconomy
-      summary: Получить финансовое состояние запуска
+      tags: [Inbox]
+      operationId: getInbox
+      summary: Получить доставленные сообщения
       description: |
-        Возвращает фактические показатели агента. Максимально достижимый баланс и
-        oracle plan агенту не раскрываются.
+        Возвращает только сообщения с `sent_at`, не превышающим текущее
+        симуляционное время run. Сообщения упорядочены по `sent_at`, затем по
+        `message_id`. Чтение inbox ничего не удаляет, не помечает прочитанным и не
+        меняет. Время при чтении продвигается по общим правилам run. Первое письмо
+        содержит доступ к начальным серверам; Basic credentials панели выдаются
+        сразу в ответе POST /v2/start, не в inbox. При
+        создании сервера и ротации credentials поступает новое письмо с логином и
+        паролем либо credential_id для отдельного источника секретов.
+      security: []
       parameters:
         - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/Cursor'
+        - name: limit
+          in: query
+          description: Максимальное количество сообщений в странице
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
       responses:
         '200':
-          description: Выручка, расходы и текущий баланс
+          description: Страница доставленных сообщений
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/EconomyResponse'
+                $ref: '#/components/schemas/InboxResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
         '404':
           $ref: '#/components/responses/RunNotFound'
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/runs/{run_id}/time/advance:
+  /v2/runs/{run_id}/control/commands:
+    parameters:
+      - $ref: '#/components/parameters/RunId'
+    get:
+      tags: [Control panel]
+      operationId: listControlCommands
+      summary: Получить каталог 18 команд управления инфраструктурой
+      description: |
+        Возвращает все команды, их описания, JSON Schema параметров и результатов,
+        требования target_auth и режим выполнения. Схемы в каталоге самодостаточны:
+        используют только локальные $defs, без внешних сетевых ссылок.
+        Полные варианты запросов также описаны в ControlCommandRequest этого документа.
+      security:
+        - ControlPanelBasicAuth: []
+      responses:
+        '200':
+          description: Каталог доступных команд
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlCommandsResponse'
+        '401':
+          $ref: '#/components/responses/ControlUnauthorized'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    post:
+      tags: [Control panel]
+      operationId: executeControlCommand
+      summary: Выполнить типизированную команду управления инфраструктурой
+      description: |
+        command выбирает ровно одну схему запроса из ControlCommandRequest.
+        params обязателен, даже если это пустой объект. Неизвестные команды,
+        лишние поля и несоответствие параметров отвергаются; произвольного shell нет.
+
+        HTTP Basic авторизует панель. target_auth дополнительно обязателен для
+        database.create/inspect/backup/restore и disk.usage/cleanup. Для остальных
+        команд target_auth запрещён. Сервер определяется по params.server_id
+        либо по целевой params.database_id; при restore это сервер назначения.
+        Панель не подставляет секрет вместо агента. Неверный серверный пароль
+        даёт TARGET_UNAUTHORIZED, ранее действовавший, но истёкший — CREDENTIALS_EXPIRED.
+
+        request_id уникален для команд текущего run. Повтор с тем же command и
+        params возвращает сохранённый ответ без повторения действия; изменение
+        command/params с тем же ID даёт IDEMPOTENCY_CONFLICT. target_auth не входит
+        в сравнение payload, но текущая авторизация проверяется и при повторе.
+        Отказ авторизации не резервирует request_id: можно получить новые
+        credentials из inbox и повторить запрос. Authorization и target_auth
+        редактируются до записи audit и никогда не включаются в ошибки/operations.
+
+        Быстрые команды возвращают 200 с типизированным результатом.
+        server.create, server.delete, database.backup, database.restore и site.stop
+        возвращают 202 с operation_id. После принятия нужно дождаться succeeded
+        через GET /operations/{operation_id}; 202 не означает завершение.
+        Идемпотентный повтор сохраняет исходные HTTP-статус и operation_id.
+        Ротация credentials не отменяет уже принятую операцию.
+
+        Остановка сайта и DISK_FULL не блокируют панель, источник credentials,
+        проверку операций и очистку диска. Время и стоимость операций симулируются.
+      security:
+        - ControlPanelBasicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControlCommandRequest'
+            examples:
+              blockSubnet:
+                summary: Заблокировать подсеть
+                value:
+                  request_id: firewall-001
+                  command: firewall.rules.upsert
+                  params:
+                    rule_id: deny-subnet
+                    priority: 100
+                    action: deny
+                    enabled: true
+                    match:
+                      source_cidr: 203.0.113.0/24
+              blockCameras:
+                summary: Заблокировать устройства с общим user-agent
+                value:
+                  request_id: firewall-002
+                  command: firewall.rules.upsert
+                  params:
+                    rule_id: deny-cameras
+                    priority: 110
+                    action: deny
+                    enabled: true
+                    match:
+                      user_agent:
+                        operator: contains
+                        value: WebCamera
+              createBackend:
+                summary: Добавить backend перед ростом нагрузки
+                value:
+                  request_id: backend-create-001
+                  command: server.create
+                  params:
+                    name: backend-black-friday
+                    role: backend
+                    instance_type: backend.standard
+              createDatabaseServer:
+                summary: Подготовить более мощный сервер БД
+                value:
+                  request_id: database-server-create-001
+                  command: server.create
+                  params:
+                    name: database-large
+                    role: database
+                    instance_type: db.large
+              stopSite:
+                value:
+                  request_id: site-stop-001
+                  command: site.stop
+                  params: {}
+              backup:
+                value:
+                  request_id: backup-001
+                  command: database.backup
+                  params:
+                    database_id: db-main
+                  target_auth:
+                    username: ops
+                    password: example-old-server-password
+              restore:
+                value:
+                  request_id: restore-001
+                  command: database.restore
+                  params:
+                    database_id: db-new
+                    backup_id: backup-001
+                  target_auth:
+                    username: ops
+                    password: example-new-server-password
+              switchDatabase:
+                value:
+                  request_id: switch-database-001
+                  command: site.database.set
+                  params:
+                    database_id: db-new
+                    expected_current_database_id: db-main
+              cleanup:
+                value:
+                  request_id: cleanup-001
+                  command: disk.cleanup
+                  params:
+                    server_id: backend-001
+                  target_auth:
+                    username: ops
+                    password: example-current-server-password
+      responses:
+        '200':
+          description: Синхронная команда выполнена или возвращён её сохранённый ответ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlCommandResponse'
+        '202':
+          description: Длительная команда принята; результат будет доступен в operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlOperationAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/ControlInvalidRequest'
+        '401':
+          $ref: '#/components/responses/ControlUnauthorized'
+        '403':
+          $ref: '#/components/responses/TargetUnauthorized'
+        '404':
+          $ref: '#/components/responses/ControlResourceNotFound'
+        '409':
+          $ref: '#/components/responses/ControlConflict'
+        '503':
+          $ref: '#/components/responses/ControlTargetUnavailable'
+
+  /v2/runs/{run_id}/credentials/{credential_id}:
+    get:
+      tags: [Credentials]
+      operationId: getServerCredentials
+      summary: Получить выданную версию credentials сервера
+      description: |
+        Возвращает конкретную версию игрового секрета, указанную в inbox или
+        результате создания сервера. Секрет ограничен текущим run; будущие
+        невыданные версии недоступны. Уже выданная версия может иметь valid_from
+        в будущем: применять её можно только в интервале [valid_from, expires_at).
+        Получение секрета само по себе не меняет пароль и не обновляет target_auth.
+        Ответ и секреты не сохраняются в audit/логи; для ответа запрещено кэширование.
+      security:
+        - ControlPanelBasicAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/CredentialId'
+      responses:
+        '200':
+          description: Игровые credentials указанного сервера и версии
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialsResponse'
+        '401':
+          $ref: '#/components/responses/ControlUnauthorized'
+        '404':
+          $ref: '#/components/responses/ControlResourceNotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v2/runs/{run_id}/time/advance:
     post:
       tags: [Time]
       operationId: advanceTime
@@ -510,6 +716,17 @@ paths:
           $ref: '#/components/responses/Conflict'
 
 components:
+  securitySchemes:
+    ControlPanelBasicAuth:
+      type: http
+      scheme: basic
+      description: |
+        Игровой логин и пароль панели из control_panel_auth ответа POST /v2/start.
+        Передавайте их в Authorization: Basic <base64(username:password)>.
+        Не являются credentials конкретного сервера и не заменяют target_auth.
+        Используются только на /control/commands и /credentials/{credential_id}.
+        Секреты не записываются в audit, логи, ответы ошибок или operation.
+
   parameters:
     RunId:
       name: run_id
@@ -526,6 +743,13 @@ components:
         type: string
         pattern: '^[A-Za-z0-9]{16,64}$'
         examples: [8Mx2Qa7Pc4Vn9Rt5]
+    CredentialId:
+      name: credential_id
+      in: path
+      required: true
+      description: Выданный идентификатор версии credentials в пределах текущего run
+      schema:
+        $ref: '#/components/schemas/ResourceId'
     From:
       name: from
       in: query
@@ -584,10 +808,120 @@ components:
               value:
                 error: CONCURRENT_RUN_REQUEST
                 message: Another request is currently modifying this run
-            taskOrder:
+            runNotRunning:
               value:
-                error: DEPLOYMENT_ORDER_VIOLATION
-                message: The requested deployment is not currently available
+                error: RUN_NOT_RUNNING
+                message: The run is no longer running
+
+    ControlUnauthorized:
+      description: Отсутствует или неверен доступ к панели текущего run
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          example: Basic realm="control"
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: CONTROL_UNAUTHORIZED
+            message: Control panel credentials are missing or invalid
+    TargetUnauthorized:
+      description: |
+        Панель авторизована, но target_auth не даёт доступ к выбранному серверу.
+        HTTP Basic повторно не запрашивается. Получите новые credentials из inbox
+        или источника секретов и повторите команду с актуальным target_auth.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalidCredentials:
+              value:
+                error: TARGET_UNAUTHORIZED
+                message: Target server credentials are invalid
+            expiredCredentials:
+              value:
+                error: CREDENTIALS_EXPIRED
+                message: Target server credentials have expired
+    ControlInvalidRequest:
+      description: Неизвестная команда, неверные параметры или несовместимый тип сервера
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            unknownCommand:
+              value:
+                error: INVALID_REQUEST
+                message: Unknown control command
+            invalidParameters:
+              value:
+                error: INVALID_REQUEST
+                message: Command parameters do not match the schema
+            roleMismatch:
+              value:
+                error: INVALID_REQUEST
+                message: Instance type does not support the requested role
+    ControlResourceNotFound:
+      description: |
+        Run или ресурс не найден в текущем run. Credentials из другого run,
+        неизвестные и ещё не выданные версии возвращают одинаковую ошибку
+        RESOURCE_NOT_FOUND без раскрытия существования секрета.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            resource:
+              value:
+                error: RESOURCE_NOT_FOUND
+                message: Resource does not exist or is not available in this run
+            run:
+              value:
+                error: RUN_NOT_FOUND
+                message: Run does not exist
+    ControlConflict:
+      description: |
+        Действие недопустимо в текущем состоянии. Ошибка не меняет состояние.
+        Возможны IDEMPOTENCY_CONFLICT, LAST_BACKEND_REQUIRED, SERVER_IN_USE,
+        SITE_NOT_STOPPED, SITE_CONFIG_CONFLICT, DB_NOT_EMPTY, DB_NOT_READY,
+        DB_BACKUP_STALE, BACKUP_NOT_READY, BACKEND_UNAVAILABLE, OPERATION_IN_PROGRESS,
+        INSUFFICIENT_DISK_SPACE, CONCURRENT_RUN_REQUEST и RUN_NOT_RUNNING.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            lastBackend:
+              value:
+                error: LAST_BACKEND_REQUIRED
+                message: The last backend server cannot be deleted
+            siteNotStopped:
+              value:
+                error: SITE_NOT_STOPPED
+                message: Wait for site.stop to succeed before this operation
+            configurationChanged:
+              value:
+                error: SITE_CONFIG_CONFLICT
+                message: Current database does not match expected_current_database_id
+            idempotency:
+              value:
+                error: IDEMPOTENCY_CONFLICT
+                message: request_id was already used with another command or params
+    ControlTargetUnavailable:
+      description: |
+        Целевой сервер или БД недоступны, например SERVER_UNAVAILABLE,
+        DB_UNAVAILABLE или DISK_FULL. disk.usage и disk.cleanup остаются доступны
+        при DISK_FULL через панель; ошибка страницы не отключает управление.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: DISK_FULL
+            message: Target server has no free disk space
 
   schemas:
     RunId:
@@ -603,6 +937,22 @@ components:
       maxLength: 128
       pattern: '^[A-Za-z0-9._:-]+$'
       examples: [request-20260824-001]
+
+    ProductId:
+      type: string
+      description: Стабильный идентификатор товара в пределах мира
+      minLength: 1
+      maxLength: 64
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+      examples: [product-001]
+
+    MessageId:
+      type: string
+      description: Стабильный идентификатор сообщения inbox в пределах мира
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9._:-]+$'
+      examples: [control-access-001]
 
     AgentId:
       type: string
@@ -623,7 +973,6 @@ components:
       enum:
         - product_list
         - product_page
-        - purchase
 
     RunStatus:
       type: string
@@ -708,6 +1057,8 @@ components:
         - status
         - simulation_time
         - simulation_ends_at
+        - commands_markdown
+        - control_panel_auth
       properties:
         run_id:
           $ref: '#/components/schemas/RunId'
@@ -726,19 +1077,170 @@ components:
           type: string
           format: date-time
 
+        commands_markdown:
+          type: string
+          minLength: 1
+          contentMediaType: text/markdown
+          description: Полный неизменённый текст COMMANDS.md, встроенный в текущую сборку сервера
+        control_panel_auth:
+          $ref: '#/components/schemas/ControlPanelAuth'
+
+    ControlPanelAuth:
+      type: object
+      additionalProperties: false
+      required: [scheme, username, password, instructions]
+      description: |
+        Выдаваемый при старте доступ к панели текущего run. Сохраняется при
+        идемпотентном повторе и перезапуске сервера; не является target_auth.
+        Передавайте через HTTPS и не сохраняйте в публичных логах.
+      properties:
+        scheme:
+          type: string
+          const: basic
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+        password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 1024
+        instructions:
+          type: string
+          minLength: 1
+          description: Инструкция передавать HTTP Basic Auth на путях панели и источника credentials этого run
+
+    AvailabilitySummary:
+      type: object
+      additionalProperties: false
+      required: [uptime_target, observed_seconds, available_seconds, downtime_seconds, uptime_ratio, slo_passed]
+      description: |
+        Доступность по времени с начала run. observed_seconds = available_seconds +
+        downtime_seconds; uptime_ratio = available_seconds / observed_seconds.
+        Учитываются интервалы состояния сервиса, даже если в них нет запросов.
+        Критерий доступности — успех всех эталонных read-only проверок легитимного
+        доступа через firewall, backend и БД без дополнительной нагрузки.
+        Ручные probes не могут увеличивать числитель этой формулы.
+      allOf:
+        - if:
+            properties:
+              observed_seconds:
+                const: 0
+          then:
+            properties:
+              available_seconds:
+                const: 0
+              downtime_seconds:
+                const: 0
+              uptime_ratio:
+                type: 'null'
+          else:
+            properties:
+              uptime_ratio:
+                type: number
+      properties:
+        uptime_target:
+          type: number
+          const: 0.99
+          description: Неизменяемый порог SLO; сравнивается без округления
+        observed_seconds:
+          type: number
+          minimum: 0
+          description: Симуляционное время от начала run до текущего момента или его завершения
+        available_seconds:
+          type: number
+          minimum: 0
+        downtime_seconds:
+          type: number
+          minimum: 0
+          description: Включает плановую остановку сайта и недоступность легитимного доступа
+        uptime_ratio:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: Доля времени доступности; null при observed_seconds=0
+        slo_passed:
+          type: [boolean, 'null']
+          description: null для running; для completed — uptime_ratio >= 0.99; для failed — false
+
+    CostSummary:
+      type: object
+      additionalProperties: false
+      required: [currency, server_cost_minor, backup_storage_cost_minor, total_cost_minor, current_cost_per_hour_minor]
+      description: |
+        Расходы в минимальных единицах валюты мира. total_cost_minor =
+        server_cost_minor + backup_storage_cost_minor. Уже начисленные расходы
+        не уменьшаются при удалении сервера. Начисления идут и при остановленном
+        сайте; отдельного дохода, бюджета или денежного баланса нет.
+      properties:
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          examples: [USD]
+        server_cost_minor:
+          type: integer
+          minimum: 0
+          description: Суммарные расходы на backend- и database-серверы с начала run
+        backup_storage_cost_minor:
+          type: integer
+          minimum: 0
+          description: Суммарные расходы на внешнее хранение бэкапов с начала run
+        total_cost_minor:
+          type: integer
+          minimum: 0
+          description: Минимизируемая стоимость полного run при соблюдении uptime SLO
+        current_cost_per_hour_minor:
+          type: integer
+          minimum: 0
+          description: Текущая суммарная ставка выделенных серверов и хранения бэкапов за симуляционный час
+
     OverviewResponse:
       type: object
       additionalProperties: false
-      required:
-        - clock
-        - run_id
-        - status
-        - site_status
-        - current_deployment_id
-        - server_count
-        - capacity_utilization
-        - error_rate
-        - balance_minor
+      required: [clock, run_id, status, site_status, server_count, capacity_utilization, error_rate, availability, costs]
+      allOf:
+        - if:
+            properties:
+              status:
+                const: running
+          then:
+            properties:
+              availability:
+                properties:
+                  slo_passed:
+                    type: 'null'
+        - if:
+            properties:
+              status:
+                const: failed
+          then:
+            properties:
+              availability:
+                properties:
+                  slo_passed:
+                    const: false
+        - if:
+            properties:
+              status:
+                const: completed
+          then:
+            properties:
+              availability:
+                allOf:
+                  - if:
+                      properties:
+                        uptime_ratio:
+                          type: number
+                          minimum: 0.99
+                    then:
+                      properties:
+                        slo_passed:
+                          const: true
+                    else:
+                      properties:
+                        slo_passed:
+                          const: false
       properties:
         clock:
           $ref: '#/components/schemas/Clock'
@@ -748,8 +1250,6 @@ components:
           $ref: '#/components/schemas/RunStatus'
         site_status:
           $ref: '#/components/schemas/SiteStatus'
-        current_deployment_id:
-          type: [string, 'null']
         server_count:
           type: integer
           minimum: 0
@@ -760,16 +1260,37 @@ components:
           type: number
           minimum: 0
           maximum: 1
-        successful_purchases:
-          type: integer
-          minimum: 0
-        revenue_minor:
-          type: integer
-        server_cost_minor:
-          type: integer
-          minimum: 0
-        balance_minor:
-          type: integer
+          description: Диагностическая доля ошибок запросов, отдельно от uptime
+        availability:
+          $ref: '#/components/schemas/AvailabilitySummary'
+        costs:
+          $ref: '#/components/schemas/CostSummary'
+      examples:
+        - clock:
+            simulation_time: '2033-03-01T01:00:00Z'
+            simulation_ends_at: '2033-04-01T00:00:00Z'
+            remaining_seconds: 2674800
+            real_elapsed_seconds: 10
+            applied_advance_seconds: 10
+          run_id: 7Kp3mN8qR2vX5cL9tF4a
+          status: running
+          site_status: healthy
+          server_count: 2
+          capacity_utilization: 0.6
+          error_rate: 0.02
+          availability:
+            uptime_target: 0.99
+            observed_seconds: 3600
+            available_seconds: 3564
+            downtime_seconds: 36
+            uptime_ratio: 0.99
+            slo_passed: null
+          costs:
+            currency: USD
+            server_cost_minor: 300
+            backup_storage_cost_minor: 20
+            total_cost_minor: 320
+            current_cost_per_hour_minor: 360
 
     MetricName:
       type: string
@@ -779,16 +1300,29 @@ components:
         - used_load_units
         - capacity_utilization
         - active_requests
+        - database_active_connections
+        - database_connection_limit
+        - disk_total_bytes
+        - disk_system_bytes
+        - disk_database_bytes
+        - disk_logs_bytes
+        - disk_free_bytes
         - requests_total
         - responses_200
         - responses_500
+        - responses_403
+        - responses_503
         - error_rate
         - latency_p50_ms
         - latency_p95_ms
-        - successful_purchases
-        - revenue_minor
-        - lost_revenue_minor
         - server_cost_minor
+        - backup_storage_cost_minor
+        - total_cost_minor
+        - current_cost_per_hour_minor
+        - observed_seconds
+        - available_seconds
+        - downtime_seconds
+        - uptime_ratio
 
     MetricValue:
       type: number
@@ -819,6 +1353,8 @@ components:
         - used_load_units
         - responses_200
         - responses_500
+        - responses_403
+        - responses_503
         - error_rate
       properties:
         page:
@@ -833,6 +1369,12 @@ components:
           type: integer
           minimum: 0
         responses_500:
+          type: integer
+          minimum: 0
+        responses_403:
+          type: integer
+          minimum: 0
+        responses_503:
           type: integer
           minimum: 0
         error_rate:
@@ -851,11 +1393,24 @@ components:
         - active_requests
         - responses_200
         - responses_500
+        - responses_403
+        - responses_503
         - error_rate
-        - successful_purchases
-        - revenue_minor
-        - lost_revenue_minor
         - server_cost_minor
+        - backup_storage_cost_minor
+        - total_cost_minor
+        - current_cost_per_hour_minor
+        - observed_seconds
+        - available_seconds
+        - downtime_seconds
+        - uptime_ratio
+        - database_active_connections
+        - database_connection_limit
+        - disk_total_bytes
+        - disk_system_bytes
+        - disk_database_bytes
+        - disk_logs_bytes
+        - disk_free_bytes
         - by_page
       properties:
         server_count:
@@ -873,10 +1428,39 @@ components:
         active_requests:
           type: integer
           minimum: 0
+        database_active_connections:
+          type: integer
+          minimum: 0
+          description: Число активных подключений к подключённой к сайту БД
+        database_connection_limit:
+          type: integer
+          minimum: 0
+          description: Лимит подключений сервера подключённой к сайту БД
+        disk_total_bytes:
+          type: integer
+          minimum: 0
+        disk_system_bytes:
+          type: integer
+          minimum: 0
+        disk_database_bytes:
+          type: integer
+          minimum: 0
+        disk_logs_bytes:
+          type: integer
+          minimum: 0
+        disk_free_bytes:
+          type: integer
+          minimum: 0
         responses_200:
           type: integer
           minimum: 0
         responses_500:
+          type: integer
+          minimum: 0
+        responses_403:
+          type: integer
+          minimum: 0
+        responses_503:
           type: integer
           minimum: 0
         error_rate:
@@ -889,17 +1473,33 @@ components:
         latency_p95_ms:
           type: number
           minimum: 0
-        successful_purchases:
-          type: integer
-          minimum: 0
-        revenue_minor:
-          type: integer
-        lost_revenue_minor:
-          type: integer
-          minimum: 0
         server_cost_minor:
           type: integer
           minimum: 0
+        backup_storage_cost_minor:
+          type: integer
+          minimum: 0
+        total_cost_minor:
+          type: integer
+          minimum: 0
+          description: server_cost_minor + backup_storage_cost_minor
+        current_cost_per_hour_minor:
+          type: integer
+          minimum: 0
+        observed_seconds:
+          type: number
+          minimum: 0
+        available_seconds:
+          type: number
+          minimum: 0
+        downtime_seconds:
+          type: number
+          minimum: 0
+        uptime_ratio:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: Доступность по времени с начала run; null до начала наблюдений
         by_page:
           type: array
           items:
@@ -930,6 +1530,10 @@ components:
         - timestamp
         - request_id
         - source
+        - source_ip
+        - user_agent
+        - region_code
+        - firewall_rule_id
         - page
         - status
         - load_units
@@ -942,15 +1546,27 @@ components:
         source:
           type: string
           enum: [visitor, probe]
+          description: visitor означает любой несинтетический входящий трафик, включая ботов
+        source_ip:
+          $ref: '#/components/schemas/IPAddress'
+        user_agent:
+          type: string
+          maxLength: 2048
+          description: User-agent моделируемого запроса; регистр сохраняется
+        region_code:
+          $ref: '#/components/schemas/RegionCode'
+        firewall_rule_id:
+          type: [string, 'null']
+          description: ID первого совпавшего allow/deny правила; null, если совпадений нет
         visitor_id:
           type: [string, 'null']
+          description: Не раскрывает легитимность; идентификаторы выдаются и обычным посетителям, и ботам
         page:
           $ref: '#/components/schemas/PageType'
         product_id:
           type: [string, 'null']
         status:
-          type: integer
-          enum: [200, 500]
+          $ref: '#/components/schemas/PageRequestStatus'
         latency_ms:
           type: number
           minimum: 0
@@ -961,10 +1577,13 @@ components:
           type: [string, 'null']
         error:
           type: [string, 'null']
-          description: Например SERVER_CAPACITY_EXCEEDED или PAGE_BUG
+          description: |
+            Например SERVER_CAPACITY_EXCEEDED, FIREWALL_DENIED,
+            SITE_STOPPED, DB_CAPACITY_EXCEEDED, DB_UNAVAILABLE, DISK_FULL.
+            Ошибки описывают инфраструктурную причину отказа.
         message:
           type: [string, 'null']
-          description: Может содержать fix-текст активного бага
+          description: Диагностическое описание причины отказа
 
     LogsResponse:
       type: object
@@ -980,6 +1599,51 @@ components:
         next_cursor:
           type: [string, 'null']
 
+    InboxMessage:
+      type: object
+      additionalProperties: false
+      required: [message_id, sender_email, sent_at, subject, description]
+      properties:
+        message_id:
+          $ref: '#/components/schemas/MessageId'
+        sender_email:
+          type: string
+          format: email
+          maxLength: 320
+        sent_at:
+          type: string
+          format: date-time
+          description: Время доставки по симуляционным часам
+        subject:
+          type: string
+          maxLength: 1000
+        description:
+          type: string
+          maxLength: 65536
+      examples:
+        - message_id: control-access-001
+          sender_email: ops@shop.example
+          sent_at: '2033-03-01T09:00:00Z'
+          subject: Доступ к панели и серверам
+          description: |-
+            Панель: логин sre-agent, пароль panel-example-password.
+            Credentials начального сервера db-main-server: credential_id=db-main-v1.
+            Получите их через GET /credentials/db-main-v1 с доступом к панели.
+
+    InboxResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, messages, next_cursor]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboxMessage'
+        next_cursor:
+          type: [string, 'null']
+
     ServerStatus:
       type: string
       enum: [provisioning, active, draining, stopped, failed]
@@ -987,15 +1651,17 @@ components:
     ServerResource:
       type: object
       additionalProperties: false
-      required:
-        - server_id
-        - status
-        - capacity_units
-        - used_load_units
-        - cost_per_hour_minor
+      required: [server_id, name, role, instance_type, status, capacity_units, used_load_units, cost_per_hour_minor, disk, database_ids, credential_id]
       properties:
         server_id:
+          $ref: '#/components/schemas/ResourceId'
+        name:
           type: string
+          minLength: 1
+        role:
+          $ref: '#/components/schemas/ServerRole'
+        instance_type:
+          $ref: '#/components/schemas/ResourceId'
         status:
           $ref: '#/components/schemas/ServerStatus'
         capacity_units:
@@ -1007,13 +1673,22 @@ components:
         cost_per_hour_minor:
           type: integer
           minimum: 0
+        disk:
+          $ref: '#/components/schemas/DiskUsage'
+        database_ids:
+          type: array
+          description: Размещённые БД; у backend пустой список
+          items:
+            $ref: '#/components/schemas/ResourceId'
+        credential_id:
+          $ref: '#/components/schemas/ResourceId'
+          description: Выданная версия credentials; сам пароль доступен только в inbox/источнике секретов
 
     ResourcesResponse:
       type: object
       additionalProperties: false
       required:
         - clock
-        - desired_instances
         - active_instances
         - total_capacity_units
         - used_load_units
@@ -1022,152 +1697,79 @@ components:
       properties:
         clock:
           $ref: '#/components/schemas/Clock'
-        desired_instances:
-          type: integer
-          minimum: 1
         active_instances:
           type: integer
           minimum: 0
+          description: Число активных backend-серверов
         total_capacity_units:
           type: number
           minimum: 0
+          description: Суммарная capacity backend; мощность БД указана отдельно у её сервера
         used_load_units:
           type: number
           minimum: 0
+          description: Текущая нагрузка backend
         total_cost_per_hour_minor:
           type: integer
           minimum: 0
+          description: Стоимость всех выделенных серверов обоих ролей; бэкапы учитываются отдельно
         servers:
+          description: Серверы backend и database текущего run
           type: array
           items:
             $ref: '#/components/schemas/ServerResource'
 
-    ScaleBackendRequest:
-      type: object
-      additionalProperties: false
-      required: [request_id, desired_instances]
-      properties:
-        request_id:
-          $ref: '#/components/schemas/RequestId'
-        desired_instances:
-          type: integer
-          minimum: 1
-          maximum: 1000
-
-    OperationAcceptedResponse:
-      type: object
-      additionalProperties: false
-      required: [clock, operation_id, status]
-      properties:
-        clock:
-          $ref: '#/components/schemas/Clock'
-        operation_id:
-          type: string
-        status:
-          $ref: '#/components/schemas/OperationStatus'
-        estimated_complete_at:
-          type: [string, 'null']
-          format: date-time
-
-    ApplyFixRequest:
-      type: object
-      additionalProperties: false
-      required: [request_id, message]
-      properties:
-        request_id:
-          $ref: '#/components/schemas/RequestId'
-        message:
-          type: string
-          minLength: 1
-          maxLength: 4096
-
-    ApplyFixResponse:
-      type: object
-      additionalProperties: false
-      required: [clock, applied]
-      properties:
-        clock:
-          $ref: '#/components/schemas/Clock'
-        applied:
-          type: boolean
-        fixed_bug:
-          type: [string, 'null']
-          description: Публичный ID исправленного бага или null при несовпадении
-        fixed_attack:
-          type: [string, 'null']
-          description: Публичный ID остановленной атаки или null
-        message:
-          type: string
-
-    DeploymentStatus:
-      type: string
-      description: |
-        `locked` — предыдущий deployment ещё не завершён; `available` — текущая
-        задача, которую агент может запустить.
-      enum: [locked, available, queued, running, succeeded, failed]
-
-    Deployment:
-      type: object
-      additionalProperties: false
-      required: [deployment_id, sequence, name, status]
-      properties:
-        deployment_id:
-          type: string
-        sequence:
-          type: integer
-          minimum: 1
-          description: Позиция deployment в очереди задач
-        name:
-          type: string
-        description:
-          type: string
-        status:
-          $ref: '#/components/schemas/DeploymentStatus'
-        operation_id:
-          type: [string, 'null']
-
-    DeploymentsResponse:
-      type: object
-      additionalProperties: false
-      required: [clock, deployments]
-      properties:
-        clock:
-          $ref: '#/components/schemas/Clock'
-        deployments:
-          type: array
-          items:
-            $ref: '#/components/schemas/Deployment'
-
-    StartDeploymentRequest:
-      type: object
-      additionalProperties: false
-      required: [request_id, deployment_id]
-      properties:
-        request_id:
-          $ref: '#/components/schemas/RequestId'
-        deployment_id:
-          type: string
-          minLength: 1
-          maxLength: 128
-
     OperationResponse:
       type: object
       additionalProperties: false
-      required:
-        - clock
-        - operation_id
-        - type
-        - status
-        - progress
-        - submitted_at
+      required: [clock, operation_id, type, command, request_id, status, progress, submitted_at, result]
+      allOf:
+        - if:
+            properties:
+              status:
+                const: succeeded
+          then:
+            properties:
+              result:
+                $ref: '#/components/schemas/ControlCommandResponse'
+              progress:
+                const: 1
+          else:
+            properties:
+              result:
+                type: 'null'
+        - if:
+            properties:
+              status:
+                const: failed
+          then:
+            required: [error]
+            properties:
+              error:
+                $ref: '#/components/schemas/ErrorResponse'
       properties:
         clock:
           $ref: '#/components/schemas/Clock'
         operation_id:
           type: string
+          pattern: '^[A-Za-z0-9]{16,64}$'
         type:
           type: string
-          enum: [scale_backend, deployment]
+          const: control_command
+        command:
+          type: string
+          enum: [server.create, server.delete, database.backup, database.restore, site.stop]
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+          description: Исходный request_id команды
+        result:
+          oneOf:
+            - $ref: '#/components/schemas/ControlCommandResponse'
+            - type: 'null'
+          description: |
+            При succeeded содержит полный результат исходной команды; command и
+            request_id совпадают с полями операции, clock отражает момент завершения.
+            До завершения и при failed — null.
         status:
           $ref: '#/components/schemas/OperationStatus'
         progress:
@@ -1192,14 +1794,24 @@ components:
       type: object
       additionalProperties: false
       required: [request_id, page]
+      allOf:
+        - if:
+            properties:
+              page:
+                const: product_page
+          then:
+            required: [product_id]
+          else:
+            not:
+              required: [product_id]
       properties:
         request_id:
           $ref: '#/components/schemas/RequestId'
         page:
           $ref: '#/components/schemas/PageType'
         product_id:
-          type: string
-          description: Обязателен для `product_page` и `purchase`; запрещён для `product_list`
+          $ref: '#/components/schemas/ProductId'
+          description: Обязателен для product_page; запрещён для product_list
 
     ProbeResponse:
       type: object
@@ -1211,6 +1823,10 @@ components:
         - status
         - latency_ms
         - load_units
+        - source_ip
+        - user_agent
+        - region_code
+        - firewall_rule_id
       properties:
         clock:
           $ref: '#/components/schemas/Clock'
@@ -1221,8 +1837,18 @@ components:
         product_id:
           type: [string, 'null']
         status:
-          type: integer
-          enum: [200, 500]
+          $ref: '#/components/schemas/PageRequestStatus'
+        source_ip:
+          $ref: '#/components/schemas/IPAddress'
+        user_agent:
+          type: string
+          maxLength: 2048
+          description: User-agent моделируемого запроса; регистр сохраняется
+        region_code:
+          $ref: '#/components/schemas/RegionCode'
+        firewall_rule_id:
+          type: [string, 'null']
+          description: ID первого совпавшего allow/deny правила; null, если совпадений нет
         latency_ms:
           type: number
           minimum: 0
@@ -1233,46 +1859,6 @@ components:
           type: [string, 'null']
         message:
           type: [string, 'null']
-
-    EconomyResponse:
-      type: object
-      additionalProperties: false
-      required:
-        - clock
-        - currency
-        - successful_purchases
-        - lost_purchases
-        - revenue_minor
-        - lost_revenue_minor
-        - server_cost_minor
-        - deployment_cost_minor
-        - balance_minor
-      properties:
-        clock:
-          $ref: '#/components/schemas/Clock'
-        currency:
-          type: string
-          pattern: '^[A-Z]{3}$'
-          examples: [USD]
-        successful_purchases:
-          type: integer
-          minimum: 0
-        lost_purchases:
-          type: integer
-          minimum: 0
-        revenue_minor:
-          type: integer
-        lost_revenue_minor:
-          type: integer
-          minimum: 0
-        server_cost_minor:
-          type: integer
-          minimum: 0
-        deployment_cost_minor:
-          type: integer
-          minimum: 0
-        balance_minor:
-          type: integer
 
     AdvanceTimeRequest:
       type: object
@@ -1312,6 +1898,1332 @@ components:
           minimum: 0
         logs_cursor:
           type: [string, 'null']
+
+    ResourceId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+      description: Идентификатор игрового ресурса в пределах текущего run
+
+    IPAddress:
+      description: IPv4 или IPv6 адрес моделируемого клиента сайта
+      oneOf:
+        - type: string
+          format: ipv4
+        - type: string
+          format: ipv6
+
+    NetworkCIDR:
+      type: string
+      minLength: 3
+      maxLength: 49
+      pattern: '^[0-9A-Fa-f:.]+/[0-9]{1,3}$'
+      description: |
+        Корректная IPv4/IPv6 сеть в CIDR. Дополнительно проверяются адрес,
+        длина префикса (0..32 для IPv4, 0..128 для IPv6) и нулевые host bits.
+      examples: [203.0.113.0/24, '2001:db8::/32']
+
+    RegionCode:
+      type: string
+      pattern: '^[A-Z]{2}$'
+      description: |
+        Двухбуквенный код региона, детерминированно назначенный миру.
+        Для неизвестного региона используется ZZ; внешний GeoIP не вызывается.
+      examples: [RU, US, ZZ]
+
+    PageRequestStatus:
+      type: integer
+      enum: [200, 403, 500, 503]
+      description: |
+        200 — успех; 403 — FIREWALL_DENIED; 500 — нехватка мощности
+        backend/БД или DISK_FULL; 503 — SITE_STOPPED
+        либо недоступность БД. Это статус страницы, не HTTP-статус команды панели.
+
+    RequestFailureCode:
+      type: string
+      enum:
+        - SERVER_CAPACITY_EXCEEDED
+        - DB_CONNECTION_LIMIT_EXCEEDED
+        - DISK_FULL
+        - SITE_UNAVAILABLE
+        - DB_UNAVAILABLE
+        - FIREWALL_DENIED
+
+    EmptyParams:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
+      description: Команда без параметров; необходимо передать пустой объект
+
+    TargetAuth:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      description: |
+        Игровые credentials выбранного сервера. Не HTTP Basic панели.
+        Секреты не сохраняются в audit и не возвращаются в результатах команд.
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+          writeOnly: true
+        password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 1024
+          writeOnly: true
+
+    ServerRole:
+      type: string
+      enum: [backend, database]
+
+    UserAgentMatch:
+      type: object
+      additionalProperties: false
+      required: [operator, value]
+      properties:
+        operator:
+          type: string
+          enum: [equals, contains]
+          description: Точное совпадение или подстрока; регистр учитывается, регулярных выражений нет
+        value:
+          type: string
+          minLength: 1
+          maxLength: 2048
+
+    FirewallMatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: Все указанные условия соединяются AND; хотя бы одно обязательно
+      properties:
+        source_cidr:
+          $ref: '#/components/schemas/NetworkCIDR'
+        region_code:
+          $ref: '#/components/schemas/RegionCode'
+        user_agent:
+          $ref: '#/components/schemas/UserAgentMatch'
+
+    FirewallRule:
+      type: object
+      additionalProperties: false
+      required: [rule_id, priority, action, match, enabled]
+      description: |
+        Правила применяются по возрастанию priority, при равенстве — лексикографически
+        по rule_id. Первое совпавшее enabled правило с ненаступившим expires_at
+        определяет результат. Без совпадений — allow. Истёкшее правило остаётся
+        в списке, но не применяется. При deny backend и БД не нагружаются.
+      properties:
+        rule_id:
+          $ref: '#/components/schemas/ResourceId'
+        priority:
+          type: integer
+          minimum: 0
+        action:
+          type: string
+          enum: [allow, deny]
+        match:
+          $ref: '#/components/schemas/FirewallMatch'
+        enabled:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+          description: Симуляционное время отключения, исключительная граница; без поля срок не ограничен
+
+    FirewallRuleView:
+      type: object
+      additionalProperties: false
+      required: [rule_id, revision, priority, action, match, enabled]
+      description: Текущее правило вместе с монотонной ревизией в пределах rule_id
+      properties:
+        rule_id:
+          $ref: '#/components/schemas/ResourceId'
+        revision:
+          type: integer
+          minimum: 1
+        priority:
+          type: integer
+          minimum: 0
+        action:
+          type: string
+          enum: [allow, deny]
+        match:
+          $ref: '#/components/schemas/FirewallMatch'
+        enabled:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+          description: Симуляционное время отключения, исключительная граница; без поля срок не ограничен
+
+    FirewallRuleIdParams:
+      type: object
+      additionalProperties: false
+      required: [rule_id]
+      properties:
+        rule_id:
+          $ref: '#/components/schemas/ResourceId'
+
+    ServerTypesListParams:
+      type: object
+      additionalProperties: false
+      properties:
+        role:
+          $ref: '#/components/schemas/ServerRole'
+          description: Без фильтра возвращаются типы обеих ролей
+
+    ServerCreateParams:
+      type: object
+      additionalProperties: false
+      required: [name, role, instance_type]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '\S'
+          description: Отображаемое непустое имя; идентификатор server_id назначает симулятор
+        role:
+          $ref: '#/components/schemas/ServerRole'
+        instance_type:
+          $ref: '#/components/schemas/ResourceId'
+          description: Тип из server.types.list с соответствующей ролью; не произвольная мощность
+          examples: [backend.standard, db.large]
+
+    ServerIdParams:
+      type: object
+      additionalProperties: false
+      required: [server_id]
+      properties:
+        server_id:
+          $ref: '#/components/schemas/ResourceId'
+
+    DatabaseCreateParams:
+      type: object
+      additionalProperties: false
+      required: [server_id, name]
+      properties:
+        server_id:
+          $ref: '#/components/schemas/ResourceId'
+          description: Активный сервер роли database
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '\S'
+          description: Имя БД; database_id назначает симулятор
+
+    DatabaseIdParams:
+      type: object
+      additionalProperties: false
+      required: [database_id]
+      properties:
+        database_id:
+          $ref: '#/components/schemas/ResourceId'
+
+    DatabaseBackupsListParams:
+      type: object
+      additionalProperties: false
+      properties:
+        database_id:
+          $ref: '#/components/schemas/ResourceId'
+          description: Фильтр по исходной БД; допустим ID уже удалённой БД с сохранёнными бэкапами
+
+    DatabaseRestoreParams:
+      type: object
+      additionalProperties: false
+      required: [database_id, backup_id]
+      properties:
+        database_id:
+          $ref: '#/components/schemas/ResourceId'
+          description: Пустая целевая БД, не исходная
+        backup_id:
+          $ref: '#/components/schemas/ResourceId'
+          description: Готовый бэкап из database.backups.list текущего run
+
+    SiteDatabaseSetParams:
+      type: object
+      additionalProperties: false
+      required: [database_id, expected_current_database_id]
+      properties:
+        database_id:
+          $ref: '#/components/schemas/ResourceId'
+          description: Готовая восстановленная целевая БД
+        expected_current_database_id:
+          $ref: '#/components/schemas/ResourceId'
+          description: Ожидаемый текущий ID из site.config.get; проверяется атомарно
+
+    ServerType:
+      type: object
+      additionalProperties: false
+      required: [instance_type, role, capacity_units, disk_bytes, connection_limit, connection_hold_ms, cost_per_hour_minor, cost_per_month_minor, provisioning_seconds]
+      properties:
+        instance_type:
+          $ref: '#/components/schemas/ResourceId'
+        role:
+          $ref: '#/components/schemas/ServerRole'
+        capacity_units:
+          type: number
+          exclusiveMinimum: 0
+          description: Пропускная способность для данной роли; backend и БД учитываются раздельно
+        disk_bytes:
+          type: integer
+          minimum: 1
+        connection_limit:
+          type: integer
+          minimum: 0
+          description: Для database — 100/200/400; для backend — 0
+        connection_hold_ms:
+          type: integer
+          minimum: 0
+          description: Для database каждое соединение занято 100 мс; для backend — 0
+        cost_per_hour_minor:
+          type: integer
+          minimum: 0
+        cost_per_month_minor:
+          type: integer
+          minimum: 0
+          description: Месячный тариф типа; для почасового backend — 0
+        provisioning_seconds:
+          type: number
+          minimum: 0
+          description: Длительность подготовки по симуляционному времени
+
+    DiskUsage:
+      type: object
+      additionalProperties: false
+      required: [server_id, total_bytes, system_bytes, database_bytes, logs_bytes, used_bytes, free_bytes, cleanable_bytes]
+      description: |
+        used_bytes = system_bytes + database_bytes + logs_bytes <= total_bytes;
+        free_bytes = total_bytes - used_bytes; cleanable_bytes = logs_bytes.
+        События заполнения увеличивают logs_bytes только до исчерпания свободного
+        места. Дальнейшие записи при полном диске не увеличивают счётчик.
+        У backend database_bytes равен 0. Очистка не изменяет system_bytes и database_bytes.
+      properties:
+        server_id:
+          $ref: '#/components/schemas/ResourceId'
+        total_bytes:
+          type: integer
+          minimum: 1
+        system_bytes:
+          type: integer
+          minimum: 0
+        database_bytes:
+          type: integer
+          minimum: 0
+        logs_bytes:
+          type: integer
+          minimum: 0
+        used_bytes:
+          type: integer
+          minimum: 0
+        free_bytes:
+          type: integer
+          minimum: 0
+        cleanable_bytes:
+          type: integer
+          minimum: 0
+
+    DatabaseResource:
+      type: object
+      additionalProperties: false
+      required: [database_id, server_id, name, status, size_bytes, data_version, capacity_units, used_load_units]
+      properties:
+        database_id:
+          $ref: '#/components/schemas/ResourceId'
+        server_id:
+          $ref: '#/components/schemas/ResourceId'
+        name:
+          type: string
+          minLength: 1
+        status:
+          type: string
+          enum: [empty, ready, backing_up, restoring, unavailable]
+        size_bytes:
+          type: integer
+          minimum: 0
+        data_version:
+          type: integer
+          minimum: 0
+          description: Версия игровых данных; растёт при записи, перенос сохраняет её
+        capacity_units:
+          type: number
+          minimum: 0
+          description: Мощность сервера БД; размещённые на нём БД делят эту мощность
+        used_load_units:
+          type: number
+          minimum: 0
+        last_restored_backup_id:
+          type: [string, 'null']
+
+    DatabaseBackup:
+      type: object
+      additionalProperties: false
+      required: [backup_id, database_id, source_server_id, status, data_version, size_bytes, created_at, storage_cost_per_hour_minor]
+      description: Внешняя резервная копия игровых данных; сохраняется после удаления исходной БД/сервера
+      properties:
+        backup_id:
+          $ref: '#/components/schemas/ResourceId'
+        database_id:
+          $ref: '#/components/schemas/ResourceId'
+        source_server_id:
+          $ref: '#/components/schemas/ResourceId'
+        status:
+          type: string
+          enum: [creating, ready, failed]
+        data_version:
+          type: integer
+          minimum: 0
+        size_bytes:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+        storage_cost_per_hour_minor:
+          type: integer
+          minimum: 0
+          description: Стоимость хранения готового бэкапа за симуляционный час
+
+    SiteConfiguration:
+      type: object
+      additionalProperties: false
+      required: [state, database_id]
+      properties:
+        state:
+          type: string
+          enum: [running, stopping, stopped]
+          description: Управляемое состояние сайта, отдельно от health в overview
+        database_id:
+          $ref: '#/components/schemas/ResourceId'
+
+    FirewallRulesListResult:
+      type: object
+      additionalProperties: false
+      required: [rules]
+      properties:
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/FirewallRuleView'
+
+    FirewallRuleResult:
+      type: object
+      additionalProperties: false
+      required: [rule]
+      properties:
+        rule:
+          $ref: '#/components/schemas/FirewallRuleView'
+
+    FirewallRuleDeletedResult:
+      type: object
+      additionalProperties: false
+      required: [rule_id, deleted]
+      properties:
+        rule_id:
+          $ref: '#/components/schemas/ResourceId'
+        deleted:
+          type: boolean
+          const: true
+
+    ServerTypesResult:
+      type: object
+      additionalProperties: false
+      required: [types]
+      properties:
+        types:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServerType'
+
+    ServerResult:
+      type: object
+      additionalProperties: false
+      required: [server]
+      properties:
+        server:
+          $ref: '#/components/schemas/ServerResource'
+
+    ServerDeletedResult:
+      type: object
+      additionalProperties: false
+      required: [server_id, deleted]
+      properties:
+        server_id:
+          $ref: '#/components/schemas/ResourceId'
+        deleted:
+          type: boolean
+          const: true
+
+    DatabaseResult:
+      type: object
+      additionalProperties: false
+      required: [database]
+      properties:
+        database:
+          $ref: '#/components/schemas/DatabaseResource'
+
+    DatabaseBackupResult:
+      type: object
+      additionalProperties: false
+      required: [backup]
+      properties:
+        backup:
+          $ref: '#/components/schemas/DatabaseBackup'
+
+    DatabaseBackupsResult:
+      type: object
+      additionalProperties: false
+      required: [backups]
+      properties:
+        backups:
+          type: array
+          items:
+            $ref: '#/components/schemas/DatabaseBackup'
+
+    SiteResult:
+      type: object
+      additionalProperties: false
+      required: [site]
+      properties:
+        site:
+          $ref: '#/components/schemas/SiteConfiguration'
+
+    DiskCleanupResult:
+      type: object
+      additionalProperties: false
+      required: [server_id, freed_bytes, usage]
+      properties:
+        server_id:
+          $ref: '#/components/schemas/ResourceId'
+        freed_bytes:
+          type: integer
+          minimum: 0
+          description: Размер логов до очистки; 0, если очищать нечего
+        usage:
+          $ref: '#/components/schemas/DiskUsage'
+          description: Состояние диска после очистки
+
+    CredentialRecord:
+      type: object
+      additionalProperties: false
+      required: [credential_id, resource_id, version, username, password, valid_from, expires_at]
+      description: |
+        Версия доступа к одному серверу текущего run; resource_id равен server_id.
+        Выдача ссылки не меняет credentials. valid_from < expires_at; значения
+        относятся к симуляционным часам. После expires_at эта версия не даёт доступ.
+      properties:
+        credential_id:
+          $ref: '#/components/schemas/ResourceId'
+        resource_id:
+          $ref: '#/components/schemas/ResourceId'
+        version:
+          type: integer
+          minimum: 1
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          format: password
+          minLength: 1
+          description: Только игровой секрет; не должен сохраняться в audit или логах
+        valid_from:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    CredentialsResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, credential]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        credential:
+          $ref: '#/components/schemas/CredentialRecord'
+
+    CommandDefinition:
+      type: object
+      additionalProperties: false
+      required: [command, description, params_schema, result_schema, target_auth_required, execution]
+      properties:
+        command:
+          $ref: '#/components/schemas/ControlCommandName'
+        description:
+          type: string
+        params_schema:
+          type: object
+          additionalProperties: true
+          description: Самодостаточная JSON Schema Draft 2020-12 объекта params, с локальными $defs при необходимости
+        result_schema:
+          type: object
+          additionalProperties: true
+          description: Самодостаточная JSON Schema Draft 2020-12 поля result ответа команды
+        target_auth_required:
+          type: boolean
+        execution:
+          type: string
+          enum: [synchronous, asynchronous]
+
+    ControlCommandsResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, commands]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        commands:
+          type: array
+          minItems: 18
+          maxItems: 18
+          description: Каждая команда из ControlCommandName ровно один раз
+          items:
+            $ref: '#/components/schemas/CommandDefinition'
+
+    ControlOperationAcceptedResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, operation_id, status]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          enum: [server.create, server.delete, database.backup, database.restore, site.stop]
+        operation_id:
+          type: string
+          pattern: '^[A-Za-z0-9]{16,64}$'
+        status:
+          $ref: '#/components/schemas/OperationStatus'
+        estimated_complete_at:
+          type: [string, 'null']
+          format: date-time
+
+    ControlCommandName:
+      type: string
+      enum:
+        - firewall.rules.list
+        - firewall.rules.upsert
+        - firewall.rules.delete
+        - server.types.list
+        - server.create
+        - server.inspect
+        - server.delete
+        - database.create
+        - database.inspect
+        - database.backup
+        - database.backups.list
+        - database.restore
+        - site.config.get
+        - site.stop
+        - site.start
+        - site.database.set
+        - disk.usage
+        - disk.cleanup
+
+    ControlCommandRequest:
+      description: Ровно один из 18 типизированных запросов; command определяет params и требование target_auth
+      oneOf:
+        - $ref: '#/components/schemas/FirewallRulesListRequest'
+        - $ref: '#/components/schemas/FirewallRulesUpsertRequest'
+        - $ref: '#/components/schemas/FirewallRulesDeleteRequest'
+        - $ref: '#/components/schemas/ServerTypesListRequest'
+        - $ref: '#/components/schemas/ServerCreateRequest'
+        - $ref: '#/components/schemas/ServerInspectRequest'
+        - $ref: '#/components/schemas/ServerDeleteRequest'
+        - $ref: '#/components/schemas/DatabaseCreateRequest'
+        - $ref: '#/components/schemas/DatabaseInspectRequest'
+        - $ref: '#/components/schemas/DatabaseBackupRequest'
+        - $ref: '#/components/schemas/DatabaseBackupsListRequest'
+        - $ref: '#/components/schemas/DatabaseRestoreRequest'
+        - $ref: '#/components/schemas/SiteConfigGetRequest'
+        - $ref: '#/components/schemas/SiteStopRequest'
+        - $ref: '#/components/schemas/SiteStartRequest'
+        - $ref: '#/components/schemas/SiteDatabaseSetRequest'
+        - $ref: '#/components/schemas/DiskUsageRequest'
+        - $ref: '#/components/schemas/DiskCleanupRequest'
+      discriminator:
+        propertyName: command
+        mapping:
+          firewall.rules.list: '#/components/schemas/FirewallRulesListRequest'
+          firewall.rules.upsert: '#/components/schemas/FirewallRulesUpsertRequest'
+          firewall.rules.delete: '#/components/schemas/FirewallRulesDeleteRequest'
+          server.types.list: '#/components/schemas/ServerTypesListRequest'
+          server.create: '#/components/schemas/ServerCreateRequest'
+          server.inspect: '#/components/schemas/ServerInspectRequest'
+          server.delete: '#/components/schemas/ServerDeleteRequest'
+          database.create: '#/components/schemas/DatabaseCreateRequest'
+          database.inspect: '#/components/schemas/DatabaseInspectRequest'
+          database.backup: '#/components/schemas/DatabaseBackupRequest'
+          database.backups.list: '#/components/schemas/DatabaseBackupsListRequest'
+          database.restore: '#/components/schemas/DatabaseRestoreRequest'
+          site.config.get: '#/components/schemas/SiteConfigGetRequest'
+          site.stop: '#/components/schemas/SiteStopRequest'
+          site.start: '#/components/schemas/SiteStartRequest'
+          site.database.set: '#/components/schemas/SiteDatabaseSetRequest'
+          disk.usage: '#/components/schemas/DiskUsageRequest'
+          disk.cleanup: '#/components/schemas/DiskCleanupRequest'
+
+    ControlCommandResponse:
+      description: Типизированный результат команды; для асинхронной команды возвращается в operation.result
+      oneOf:
+        - $ref: '#/components/schemas/FirewallRulesListResponse'
+        - $ref: '#/components/schemas/FirewallRulesUpsertResponse'
+        - $ref: '#/components/schemas/FirewallRulesDeleteResponse'
+        - $ref: '#/components/schemas/ServerTypesListResponse'
+        - $ref: '#/components/schemas/ServerCreateResponse'
+        - $ref: '#/components/schemas/ServerInspectResponse'
+        - $ref: '#/components/schemas/ServerDeleteResponse'
+        - $ref: '#/components/schemas/DatabaseCreateResponse'
+        - $ref: '#/components/schemas/DatabaseInspectResponse'
+        - $ref: '#/components/schemas/DatabaseBackupResponse'
+        - $ref: '#/components/schemas/DatabaseBackupsListResponse'
+        - $ref: '#/components/schemas/DatabaseRestoreResponse'
+        - $ref: '#/components/schemas/SiteConfigGetResponse'
+        - $ref: '#/components/schemas/SiteStopResponse'
+        - $ref: '#/components/schemas/SiteStartResponse'
+        - $ref: '#/components/schemas/SiteDatabaseSetResponse'
+        - $ref: '#/components/schemas/DiskUsageResponse'
+        - $ref: '#/components/schemas/DiskCleanupResponse'
+      discriminator:
+        propertyName: command
+        mapping:
+          firewall.rules.list: '#/components/schemas/FirewallRulesListResponse'
+          firewall.rules.upsert: '#/components/schemas/FirewallRulesUpsertResponse'
+          firewall.rules.delete: '#/components/schemas/FirewallRulesDeleteResponse'
+          server.types.list: '#/components/schemas/ServerTypesListResponse'
+          server.create: '#/components/schemas/ServerCreateResponse'
+          server.inspect: '#/components/schemas/ServerInspectResponse'
+          server.delete: '#/components/schemas/ServerDeleteResponse'
+          database.create: '#/components/schemas/DatabaseCreateResponse'
+          database.inspect: '#/components/schemas/DatabaseInspectResponse'
+          database.backup: '#/components/schemas/DatabaseBackupResponse'
+          database.backups.list: '#/components/schemas/DatabaseBackupsListResponse'
+          database.restore: '#/components/schemas/DatabaseRestoreResponse'
+          site.config.get: '#/components/schemas/SiteConfigGetResponse'
+          site.stop: '#/components/schemas/SiteStopResponse'
+          site.start: '#/components/schemas/SiteStartResponse'
+          site.database.set: '#/components/schemas/SiteDatabaseSetResponse'
+          disk.usage: '#/components/schemas/DiskUsageResponse'
+          disk.cleanup: '#/components/schemas/DiskCleanupResponse'
+
+    FirewallRulesListRequest:
+      type: object
+      additionalProperties: false
+      description: "Получить правила в порядке применения, включая отключённые и истёкшие."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: firewall.rules.list
+        params:
+          $ref: '#/components/schemas/EmptyParams'
+      examples:
+        - {"request_id":"example-firewall.rules.list","command":"firewall.rules.list","params":{}}
+
+    FirewallRulesListResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: firewall.rules.list
+        result:
+          $ref: '#/components/schemas/FirewallRulesListResult'
+
+    FirewallRulesUpsertRequest:
+      type: object
+      additionalProperties: false
+      description: "Создать или полностью заменить правило по rule_id. Не является частичным обновлением. expires_at должен быть в будущем относительно часов run; отсутствие снимает срок действия."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: firewall.rules.upsert
+        params:
+          $ref: '#/components/schemas/FirewallRule'
+      examples:
+        - {"request_id":"example-firewall.rules.upsert","command":"firewall.rules.upsert","params":{"rule_id":"deny-cameras","priority":100,"action":"deny","match":{"user_agent":{"operator":"contains","value":"WebCamera"}},"enabled":true}}
+
+    FirewallRulesUpsertResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: firewall.rules.upsert
+        result:
+          $ref: '#/components/schemas/FirewallRuleResult'
+
+    FirewallRulesDeleteRequest:
+      type: object
+      additionalProperties: false
+      description: "Удалить правило по rule_id. Неизвестный ID возвращает RESOURCE_NOT_FOUND."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: firewall.rules.delete
+        params:
+          $ref: '#/components/schemas/FirewallRuleIdParams'
+      examples:
+        - {"request_id":"example-firewall.rules.delete","command":"firewall.rules.delete","params":{"rule_id":"deny-cameras"}}
+
+    FirewallRulesDeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: firewall.rules.delete
+        result:
+          $ref: '#/components/schemas/FirewallRuleDeletedResult'
+
+    ServerTypesListRequest:
+      type: object
+      additionalProperties: false
+      description: "Получить фиксированный каталог типов серверов с capacity, размером диска, стоимостью и временем подготовки. Фильтр role необязателен."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.types.list
+        params:
+          $ref: '#/components/schemas/ServerTypesListParams'
+      examples:
+        - {"request_id":"example-server.types.list","command":"server.types.list","params":{}}
+
+    ServerTypesListResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.types.list
+        result:
+          $ref: '#/components/schemas/ServerTypesResult'
+
+    ServerCreateRequest:
+      type: object
+      additionalProperties: false
+      description: "Создать backend или database сервер выбранного типа. Тип обязан поддерживать role. Backend после подготовки автоматически входит в пул работающего сайта; при остановленном сайте запросов не получает. Результат и inbox содержат credential_id. Увеличение мощности выполняется созданием новых серверов, не backend.scale."
+      x-execution: asynchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.create
+        params:
+          $ref: '#/components/schemas/ServerCreateParams'
+      examples:
+        - {"request_id":"example-server.create","command":"server.create","params":{"name":"database-large","role":"database","instance_type":"db.large"}}
+
+    ServerCreateResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.create
+        result:
+          $ref: '#/components/schemas/ServerResult'
+
+    ServerInspectRequest:
+      type: object
+      additionalProperties: false
+      description: "Получить состояние, роль, мощность, стоимость, диск и размещённые БД сервера. Достаточно авторизации панели."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.inspect
+        params:
+          $ref: '#/components/schemas/ServerIdParams'
+      examples:
+        - {"request_id":"example-server.inspect","command":"server.inspect","params":{"server_id":"db-server-new"}}
+
+    ServerInspectResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.inspect
+        result:
+          $ref: '#/components/schemas/ServerResult'
+
+    ServerDeleteRequest:
+      type: object
+      additionalProperties: false
+      description: "Удалить сервер. Backend сначала исключается из приёма новых запросов и завершает текущие. Последний backend удалить нельзя, в том числе при остановленном сайте; уже удаляемые серверы не считаются оставшимися. Сервер подключённой к сайту БД удалить нельзя даже при остановке сайта. Операции БД на сервере должны завершиться. Удаление уничтожает размещённые БД и прекращает оплату только после завершения; внешние бэкапы сохраняются."
+      x-execution: asynchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.delete
+        params:
+          $ref: '#/components/schemas/ServerIdParams'
+      examples:
+        - {"request_id":"example-server.delete","command":"server.delete","params":{"server_id":"db-server-old"}}
+
+    ServerDeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: server.delete
+        result:
+          $ref: '#/components/schemas/ServerDeletedResult'
+
+    DatabaseCreateRequest:
+      type: object
+      additionalProperties: false
+      description: "Создать пустую БД на активном сервере роли database при достаточном месте. target_auth относится к params.server_id. БД получает состояние empty и не подключается к сайту автоматически."
+      x-execution: synchronous
+      x-target-auth-required: true
+      required: [request_id, command, params, target_auth]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.create
+        params:
+          $ref: '#/components/schemas/DatabaseCreateParams'
+        target_auth:
+          $ref: '#/components/schemas/TargetAuth'
+      examples:
+        - {"request_id":"example-database.create","command":"database.create","params":{"server_id":"db-server-new","name":"shop-new"},"target_auth":{"username":"ops","password":"example-server-password"}}
+
+    DatabaseCreateResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.create
+        result:
+          $ref: '#/components/schemas/DatabaseResult'
+
+    DatabaseInspectRequest:
+      type: object
+      additionalProperties: false
+      description: "Получить состояние, сервер, размер, версию данных и нагрузку БД. target_auth относится к серверу указанной database_id."
+      x-execution: synchronous
+      x-target-auth-required: true
+      required: [request_id, command, params, target_auth]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.inspect
+        params:
+          $ref: '#/components/schemas/DatabaseIdParams'
+        target_auth:
+          $ref: '#/components/schemas/TargetAuth'
+      examples:
+        - {"request_id":"example-database.inspect","command":"database.inspect","params":{"database_id":"db-main"},"target_auth":{"username":"ops","password":"example-server-password"}}
+
+    DatabaseInspectResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.inspect
+        result:
+          $ref: '#/components/schemas/DatabaseResult'
+
+    DatabaseBackupRequest:
+      type: object
+      additionalProperties: false
+      description: "Создать бэкап данных БД во внешнем хранилище. Для подключённой к сайту БД разрешён только после завершённого site.stop; состояние stopping недостаточно. target_auth относится к исходному серверу. Сайт нельзя запустить, пока бэкап его БД не завершён. Версия данных фиксируется в бэкапе; хранение имеет стоимость."
+      x-execution: asynchronous
+      x-target-auth-required: true
+      required: [request_id, command, params, target_auth]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.backup
+        params:
+          $ref: '#/components/schemas/DatabaseIdParams'
+        target_auth:
+          $ref: '#/components/schemas/TargetAuth'
+      examples:
+        - {"request_id":"example-database.backup","command":"database.backup","params":{"database_id":"db-main"},"target_auth":{"username":"ops","password":"example-server-password"}}
+
+    DatabaseBackupResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.backup
+        result:
+          $ref: '#/components/schemas/DatabaseBackupResult'
+
+    DatabaseBackupsListRequest:
+      type: object
+      additionalProperties: false
+      description: "Получить бэкапы из панели, включая creating и failed; без database_id возвращаются все выданные бэкапы текущего run. Credentials исходного сервера не нужны, удаление сервера не удаляет бэкапы."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.backups.list
+        params:
+          $ref: '#/components/schemas/DatabaseBackupsListParams'
+      examples:
+        - {"request_id":"example-database.backups.list","command":"database.backups.list","params":{}}
+
+    DatabaseBackupsListResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.backups.list
+        result:
+          $ref: '#/components/schemas/DatabaseBackupsResult'
+
+    DatabaseRestoreRequest:
+      type: object
+      additionalProperties: false
+      description: "Восстановить готовый бэкап в пустую целевую БД. database_id и target_auth относятся к назначению. Цель должна иметь достаточно места; непустая цель даёт DB_NOT_EMPTY, незавершённый бэкап — BACKUP_NOT_READY. Если цель подключена к сайту, сайт должен быть stopped и оставаться остановленным до завершения. При succeeded данные и версия совпадают с бэкапом; сайт сам не переключается."
+      x-execution: asynchronous
+      x-target-auth-required: true
+      required: [request_id, command, params, target_auth]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.restore
+        params:
+          $ref: '#/components/schemas/DatabaseRestoreParams'
+        target_auth:
+          $ref: '#/components/schemas/TargetAuth'
+      examples:
+        - {"request_id":"example-database.restore","command":"database.restore","params":{"database_id":"db-new","backup_id":"backup-001"},"target_auth":{"username":"ops","password":"example-server-password"}}
+
+    DatabaseRestoreResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: database.restore
+        result:
+          $ref: '#/components/schemas/DatabaseResult'
+
+    SiteConfigGetRequest:
+      type: object
+      additionalProperties: false
+      description: "Получить состояние всего сайта и подключённую database_id."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.config.get
+        params:
+          $ref: '#/components/schemas/EmptyParams'
+      examples:
+        - {"request_id":"example-site.config.get","command":"site.config.get","params":{}}
+
+    SiteConfigGetResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.config.get
+        result:
+          $ref: '#/components/schemas/SiteResult'
+
+    SiteStopRequest:
+      type: object
+      additionalProperties: false
+      description: "Остановить приём новых запросов всем backend и дождаться завершения активных обращений к БД. До succeeded сайт stopping; затем stopped и новых обращений приложения к БД нет. Время остановки учитывается как downtime_seconds, включая интервалы без посетителей; запросы в это время дают SITE_STOPPED. Панель и БД доступны для служебных команд; оплата серверов продолжается. Повтор с новым request_id при уже stopped возвращает завершённую операцию без повторной остановки."
+      x-execution: asynchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.stop
+        params:
+          $ref: '#/components/schemas/EmptyParams'
+      examples:
+        - {"request_id":"example-site.stop","command":"site.stop","params":{}}
+
+    SiteStopResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.stop
+        result:
+          $ref: '#/components/schemas/SiteResult'
+
+    SiteStartRequest:
+      type: object
+      additionalProperties: false
+      description: "Запустить сайт при наличии активного backend и готовой подключённой БД. Запуск во время stopping, бэкапа подключённой БД или её восстановления запрещён. Уже running — успешный no-op. Возобновляется обслуживание read-only страниц."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.start
+        params:
+          $ref: '#/components/schemas/EmptyParams'
+      examples:
+        - {"request_id":"example-site.start","command":"site.start","params":{}}
+
+    SiteStartResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.start
+        result:
+          $ref: '#/components/schemas/SiteResult'
+
+    SiteDatabaseSetRequest:
+      type: object
+      additionalProperties: false
+      description: "Атомарно переключить конфигурацию остановленного сайта на готовую БД. Текущий ID должен совпадать с expected_current_database_id, иначе SITE_CONFIG_CONFLICT. Операции с обеими БД должны завершиться; целевая БД должна быть восстановлена из бэкапа текущей БД с её финальной версией данных, иначе DB_BACKUP_STALE. Сайт остаётся stopped до site.start."
+      x-execution: synchronous
+      x-target-auth-required: false
+      required: [request_id, command, params]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.database.set
+        params:
+          $ref: '#/components/schemas/SiteDatabaseSetParams'
+      examples:
+        - {"request_id":"example-site.database.set","command":"site.database.set","params":{"database_id":"db-new","expected_current_database_id":"db-main"}}
+
+    SiteDatabaseSetResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: site.database.set
+        result:
+          $ref: '#/components/schemas/SiteResult'
+
+    DiskUsageRequest:
+      type: object
+      additionalProperties: false
+      description: "Получить счётчики диска указанного сервера, в том числе при DISK_FULL. target_auth относится к params.server_id."
+      x-execution: synchronous
+      x-target-auth-required: true
+      required: [request_id, command, params, target_auth]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: disk.usage
+        params:
+          $ref: '#/components/schemas/ServerIdParams'
+        target_auth:
+          $ref: '#/components/schemas/TargetAuth'
+      examples:
+        - {"request_id":"example-disk.usage","command":"disk.usage","params":{"server_id":"backend-001"},"target_auth":{"username":"ops","password":"example-server-password"}}
+
+    DiskUsageResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: disk.usage
+        result:
+          $ref: '#/components/schemas/DiskUsage'
+
+    DiskCleanupRequest:
+      type: object
+      additionalProperties: false
+      description: "Обнулить счётчик накопленных логов и вернуть freed_bytes. Не удаляет данные БД, системные данные, публичные логи запросов или внутренний журнал симуляции. Реальные файлы не создаются и не удаляются. Доступна при DISK_FULL; пустой счётчик даёт freed_bytes=0."
+      x-execution: synchronous
+      x-target-auth-required: true
+      required: [request_id, command, params, target_auth]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: disk.cleanup
+        params:
+          $ref: '#/components/schemas/ServerIdParams'
+        target_auth:
+          $ref: '#/components/schemas/TargetAuth'
+      examples:
+        - {"request_id":"example-disk.cleanup","command":"disk.cleanup","params":{"server_id":"backend-001"},"target_auth":{"username":"ops","password":"example-server-password"}}
+
+    DiskCleanupResponse:
+      type: object
+      additionalProperties: false
+      required: [clock, request_id, command, result]
+      properties:
+        clock:
+          $ref: '#/components/schemas/Clock'
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        command:
+          type: string
+          const: disk.cleanup
+        result:
+          $ref: '#/components/schemas/DiskCleanupResult'
 
     ErrorResponse:
       type: object

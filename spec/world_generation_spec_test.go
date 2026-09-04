@@ -26,7 +26,7 @@ func TestRunsOfSameWorldHaveIndependentEventStreams(t *testing.T) {
 	first.Given(first.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)))
 	second.Given(second.World.Created(42, worldStartsAt, worldStartsAt.Add(24*time.Hour)))
 
-	first.When(first.Product.Add("product-only-in-first", "First product", 1_000, 100_000, 100_000))
+	first.When(first.Product.Add("product-only-in-first", "First product", 1_000, 100_000))
 	second.Then(second.State.HasNoProduct("product-only-in-first"))
 }
 

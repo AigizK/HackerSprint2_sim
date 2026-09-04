@@ -2,37 +2,38 @@ package application
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"time"
 
+	"github.com/aigizk/hackersprint2-sim/internal/controlauth"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
-type RunService struct{ manager *RunManager }
-
-func NewRunService(manager *RunManager) *RunService { return &RunService{manager: manager} }
-
-type OperationAccepted struct {
-	Operation           simulation.OperationView
-	EstimatedCompleteAt time.Time
+type RunService struct {
+	manager     *RunManager
+	credentials controlauth.ServerCredentialRepository
 }
 
-type FixResult struct {
-	Applied  bool
-	BugID    model.BugID
-	AttackID model.AttackID
-	Message  string
+func NewRunService(manager *RunManager, credentials ...controlauth.ServerCredentialRepository) *RunService {
+	service := &RunService{manager: manager}
+	if len(credentials) > 0 {
+		service.credentials = credentials[0]
+	}
+	return service
 }
 
 type ProbeResult struct {
-	StatusCode int
-	Latency    time.Duration
-	LoadUnits  int64
-	ErrorCode  model.RequestFailureCode
-	Message    string
+	StatusCode     int
+	Latency        time.Duration
+	LoadUnits      int64
+	SourceIP       string
+	UserAgent      string
+	RegionCode     model.RegionCode
+	FirewallRuleID model.FirewallRuleID
+	ErrorCode      model.RequestFailureCode
+	Message        string
 }
 
 type AdvanceTimeResult struct {
@@ -42,6 +43,42 @@ type AdvanceTimeResult struct {
 	ProcessedEvents        int
 	NewLogs                int
 	LogsCursor             string
+}
+
+type FirewallRuleResult struct {
+	Rule     model.FirewallRule
+	Revision uint64
+}
+
+func (s *RunService) FirewallRules(ctx context.Context, runID string, request AgentRequest) (ApplicationResponse, error) {
+	return s.observe(ctx, runID, request, false, func(projection simulation.Projection) any {
+		return projection.FirewallRules()
+	})
+}
+
+func (s *RunService) UpsertFirewallRule(ctx context.Context, runID string, request AgentRequest, rule model.FirewallRule) (ApplicationResponse, error) {
+	if !ValidRequestID(string(request.CommandID)) {
+		return ApplicationResponse{}, ErrInvalidRequest
+	}
+	return s.manager.Handle(ctx, runID, request, func(ctx context.Context, run *RunContext) (ApplicationResponse, error) {
+		if _, err := run.Session.Execute(ctx, simulation.UpsertFirewallRule{CommandID: request.CommandID, Rule: rule}); err != nil {
+			return ApplicationResponse{}, err
+		}
+		stored := run.Session.State().FirewallRules[rule.ID]
+		return ApplicationResponse{StatusCode: 200, Value: FirewallRuleResult{Rule: stored.Rule, Revision: stored.Revision}}, nil
+	})
+}
+
+func (s *RunService) DeleteFirewallRule(ctx context.Context, runID string, request AgentRequest, ruleID model.FirewallRuleID) (ApplicationResponse, error) {
+	if !ValidRequestID(string(request.CommandID)) {
+		return ApplicationResponse{}, ErrInvalidRequest
+	}
+	return s.manager.Handle(ctx, runID, request, func(ctx context.Context, run *RunContext) (ApplicationResponse, error) {
+		if _, err := run.Session.Execute(ctx, simulation.DeleteFirewallRule{CommandID: request.CommandID, RuleID: ruleID}); err != nil {
+			return ApplicationResponse{}, err
+		}
+		return ApplicationResponse{StatusCode: 200, Value: ruleID}, nil
+	})
 }
 
 func (s *RunService) Overview(ctx context.Context, runID string, request AgentRequest) (ApplicationResponse, error) {
@@ -64,10 +101,30 @@ func (s *RunService) Logs(ctx context.Context, runID string, request AgentReques
 			query.Limit = 100
 		}
 		if query.Limit < 1 || query.Limit > 1000 || (!query.From.IsZero() && !query.To.IsZero() && query.To.Before(query.From)) ||
-			(query.StatusCode != 0 && query.StatusCode != 200 && query.StatusCode != 500) || !validOptionalPage(query.Page) {
+			(query.StatusCode != 0 && query.StatusCode != 200 && query.StatusCode != 403 && query.StatusCode != 500 && query.StatusCode != 503) ||
+			!validOptionalPage(query.Page) || !validOptionalRequestFailure(query.ErrorCode) ||
+			(query.HasError != nil && !*query.HasError && query.ErrorCode != "") {
 			return ApplicationResponse{}, ErrInvalidRequest
 		}
 		value, err := run.Session.Projection().Logs(query)
+		return ApplicationResponse{StatusCode: 200, Value: value}, err
+	})
+}
+
+func (s *RunService) Inbox(ctx context.Context, runID string, request AgentRequest, query simulation.InboxQuery) (ApplicationResponse, error) {
+	return s.manager.Handle(ctx, runID, request, func(ctx context.Context, run *RunContext) (ApplicationResponse, error) {
+		if s.credentials != nil {
+			if err := ensureServerCredentials(ctx, s.credentials, run.Session); err != nil {
+				return ApplicationResponse{}, err
+			}
+		}
+		if query.Limit == 0 {
+			query.Limit = 100
+		}
+		if query.Limit < 1 || query.Limit > 1000 || len(query.Cursor) > 512 {
+			return ApplicationResponse{}, ErrInvalidRequest
+		}
+		value, err := simulation.NewProjection(nil, run.Session.State()).Inbox(query)
 		return ApplicationResponse{StatusCode: 200, Value: value}, err
 	})
 }
@@ -77,9 +134,12 @@ func validateMetricsQuery(query simulation.MetricsQuery) error {
 		return ErrInvalidRequest
 	}
 	valid := map[string]bool{"server_count": true, "capacity_units": true, "used_load_units": true, "capacity_utilization": true,
-		"active_requests": true, "requests_total": true, "responses_200": true, "responses_500": true, "error_rate": true,
-		"latency_p50_ms": true, "latency_p95_ms": true, "successful_purchases": true, "revenue_minor": true,
-		"lost_revenue_minor": true, "server_cost_minor": true}
+		"active_requests": true, "requests_total": true, "responses_200": true, "responses_403": true, "responses_500": true, "responses_503": true, "error_rate": true,
+		"latency_p50_ms": true, "latency_p95_ms": true, "server_cost_minor": true, "backup_storage_cost_minor": true,
+		"total_cost_minor": true, "current_cost_per_hour_minor": true, "observed_seconds": true,
+		"available_seconds": true, "downtime_seconds": true, "uptime_ratio": true,
+		"database_active_connections": true, "database_connection_limit": true, "disk_total_bytes": true,
+		"disk_system_bytes": true, "disk_database_bytes": true, "disk_logs_bytes": true, "disk_free_bytes": true}
 	for _, name := range query.Names {
 		if !valid[name] {
 			return ErrInvalidRequest
@@ -89,91 +149,29 @@ func validateMetricsQuery(query simulation.MetricsQuery) error {
 }
 
 func validOptionalPage(page model.PageType) bool {
-	return page == "" || page == model.PageProductList || page == model.PageProduct || page == model.PagePurchase
+	return page == "" || page == model.PageProductList || page == model.PageProduct
+}
+
+func validOptionalRequestFailure(code model.RequestFailureCode) bool {
+	switch code {
+	case "", model.FailureServerCapacityExceeded, model.FailureDBConnectionLimit, model.FailureDiskFull,
+		model.FailureSiteUnavailable, model.FailureDatabaseUnavailable, model.FailureFirewallDenied:
+		return true
+	default:
+		return false
+	}
 }
 func (s *RunService) Resources(ctx context.Context, runID string, request AgentRequest) (ApplicationResponse, error) {
 	return s.observe(ctx, runID, request, false, func(projection simulation.Projection) any { return projection.Resources() })
 }
-func (s *RunService) Deployments(ctx context.Context, runID string, request AgentRequest) (ApplicationResponse, error) {
-	return s.observe(ctx, runID, request, false, func(projection simulation.Projection) any { return projection.Deployments() })
-}
-func (s *RunService) Economy(ctx context.Context, runID string, request AgentRequest) (ApplicationResponse, error) {
-	return s.observe(ctx, runID, request, false, func(projection simulation.Projection) any { return projection.Economy() })
+
+func (s *RunService) ControlClock(ctx context.Context, runID string, request AgentRequest) (ApplicationResponse, error) {
+	return s.observe(ctx, runID, request, false, func(simulation.Projection) any { return nil })
 }
 func (s *RunService) Operation(ctx context.Context, runID string, request AgentRequest, operationID model.OperationID) (ApplicationResponse, error) {
 	return s.manager.Handle(ctx, runID, request, func(_ context.Context, run *RunContext) (ApplicationResponse, error) {
 		value, err := simulation.NewProjection(nil, run.State).Operation(operationID)
 		return ApplicationResponse{StatusCode: 200, Value: value}, err
-	})
-}
-
-func (s *RunService) ScaleBackend(ctx context.Context, runID string, request AgentRequest, desired int) (ApplicationResponse, error) {
-	if desired < simulation.MinimumBackendInstances || desired > 1000 || !ValidRequestID(string(request.CommandID)) {
-		return ApplicationResponse{}, ErrInvalidRequest
-	}
-	operationID := StableOperationID(runID, request.CommandID, "scale")
-	request.ExpectedCommandPayload = fmt.Sprintf("scale:%s:%d", operationID, desired)
-	return s.manager.Handle(ctx, runID, request, func(ctx context.Context, run *RunContext) (ApplicationResponse, error) {
-		operationID := run.State.Commands[request.CommandID]
-		if operationID == "" {
-			operationID = StableOperationID(runID, request.CommandID, "scale")
-			if _, err := run.Session.Execute(ctx, simulation.SetBackendDesiredInstances{CommandID: request.CommandID, OperationID: operationID, DesiredInstances: desired}); err != nil {
-				return ApplicationResponse{}, err
-			}
-		}
-		state := run.Session.State()
-		operation, err := simulation.NewProjection(nil, state).Operation(operationID)
-		if err != nil {
-			return ApplicationResponse{}, err
-		}
-		status := 202
-		if operation.Status == model.OperationStatusSucceeded || run.Duplicate {
-			status = 200
-		}
-		return ApplicationResponse{StatusCode: status, Value: OperationAccepted{Operation: operation, EstimatedCompleteAt: latestScaleReadyAt(state, operationID)}}, nil
-	})
-}
-
-func (s *RunService) ApplyFix(ctx context.Context, runID string, request AgentRequest, message string) (ApplicationResponse, error) {
-	if !ValidRequestID(string(request.CommandID)) || len(message) == 0 || len(message) > 4096 {
-		return ApplicationResponse{}, ErrInvalidRequest
-	}
-	request.ExpectedCommandPayload = "fix:" + message
-	return s.manager.Handle(ctx, runID, request, func(ctx context.Context, run *RunContext) (ApplicationResponse, error) {
-		if !run.Duplicate {
-			if _, err := run.Session.Execute(ctx, simulation.ApplyFix{CommandID: request.CommandID, Message: message}); err != nil {
-				return ApplicationResponse{}, err
-			}
-		}
-		fix := run.Session.State().Fixes[request.CommandID]
-		return ApplicationResponse{StatusCode: 200, Value: FixResult{Applied: fix.Status == model.FixAccepted, BugID: fix.BugID, AttackID: fix.AttackID, Message: string(fix.Status)}}, nil
-	})
-}
-
-func (s *RunService) StartDeployment(ctx context.Context, runID string, request AgentRequest, deploymentID model.DeploymentID) (ApplicationResponse, error) {
-	if !ValidRequestID(string(request.CommandID)) || deploymentID == "" || len(deploymentID) > 128 {
-		return ApplicationResponse{}, ErrInvalidRequest
-	}
-	operationID := StableOperationID(runID, request.CommandID, "deployment")
-	request.ExpectedCommandPayload = fmt.Sprintf("deployment:%s:%s", deploymentID, operationID)
-	return s.manager.Handle(ctx, runID, request, func(ctx context.Context, run *RunContext) (ApplicationResponse, error) {
-		operationID := run.State.Commands[request.CommandID]
-		if operationID == "" {
-			operationID = StableOperationID(runID, request.CommandID, "deployment")
-			if _, err := run.Session.Execute(ctx, simulation.StartDeployment{CommandID: request.CommandID, DeploymentID: deploymentID, OperationID: operationID}); err != nil {
-				return ApplicationResponse{}, err
-			}
-		}
-		state := run.Session.State()
-		operation, err := simulation.NewProjection(nil, state).Operation(operationID)
-		if err != nil {
-			return ApplicationResponse{}, err
-		}
-		status := 202
-		if run.Duplicate {
-			status = 200
-		}
-		return ApplicationResponse{StatusCode: status, Value: OperationAccepted{Operation: operation, EstimatedCompleteAt: state.Deployments[deploymentID].ExpectedCompletionAt}}, nil
 	})
 }
 
@@ -199,10 +197,15 @@ func (s *RunService) Probe(ctx context.Context, runID string, request AgentReque
 			switch event := event.(type) {
 			case events.PageRequestStarted:
 				result.LoadUnits = event.LoadUnits
+				result.SourceIP, result.UserAgent, result.RegionCode = event.SourceIP, event.UserAgent, event.RegionCode
+			case events.FirewallRequestEvaluated:
+				result.FirewallRuleID = event.MatchedRuleID
 			case events.PageRequestCompleted:
 				result.StatusCode, result.Latency, result.ErrorCode, result.Message = event.StatusCode, event.Latency, event.ErrorCode, event.Message
+				result.FirewallRuleID = event.FirewallRuleID
 			case events.PageRequestRejected:
 				result.StatusCode, result.ErrorCode, result.Message = event.StatusCode, event.ErrorCode, event.Message
+				result.FirewallRuleID = event.FirewallRuleID
 			}
 		}
 		return ApplicationResponse{StatusCode: 200, Value: result}, nil
@@ -233,23 +236,4 @@ func (s *RunService) observe(ctx context.Context, runID string, request AgentReq
 		}
 		return ApplicationResponse{StatusCode: 200, Value: project(projection)}, nil
 	})
-}
-
-func StableOperationID(runID string, commandID model.CommandID, kind string) model.OperationID {
-	digest := sha256.Sum256([]byte(runID + "\x00" + string(commandID) + "\x00" + kind))
-	result := make([]byte, 24)
-	for index := range result {
-		result[index] = runIDAlphabet[int(digest[index])%len(runIDAlphabet)]
-	}
-	return model.OperationID(result)
-}
-
-func latestScaleReadyAt(state simulation.State, operationID model.OperationID) time.Time {
-	var latest time.Time
-	for _, server := range state.Servers {
-		if server.OperationID == operationID && server.ReadyAt.After(latest) {
-			latest = server.ReadyAt
-		}
-	}
-	return latest
 }

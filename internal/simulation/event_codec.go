@@ -3,6 +3,7 @@ package simulation
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
@@ -73,170 +74,78 @@ func DecodeEvent(eventType string, payload []byte) (events.Event, error) {
 }
 
 func dereferenceEvent(event events.Event) events.Event {
-	switch event := event.(type) {
-	case *events.WorldCreated:
-		return *event
-	case *events.ProductAdded:
-		return *event
-	case *events.ProductPurchased:
-		return *event
-	case *events.TimeAdvanced:
-		return *event
-	case *events.PageConfigured:
-		return *event
-	case *events.InfrastructureConfigured:
-		return *event
-	case *events.RunEnded:
-		return *event
-	case *events.VisitorArrived:
-		return *event
-	case *events.ProductSelected:
-		return *event
-	case *events.PurchaseIntentCreated:
-		return *event
-	case *events.VisitorJourneyCompleted:
-		return *event
-	case *events.PageRequestStarted:
-		return *event
-	case *events.PageRequestAccepted:
-		return *event
-	case *events.CapacityAllocationReleased:
-		return *event
-	case *events.PageRequestCompleted:
-		return *event
-	case *events.PageRequestRejected:
-		return *event
-	case *events.BackendScaleRequested:
-		return *event
-	case *events.ServerProvisioningStarted:
-		return *event
-	case *events.ServerActivated:
-		return *event
-	case *events.ServerDrainingStarted:
-		return *event
-	case *events.ServerRemoved:
-		return *event
-	case *events.ServerProvisioningFailed:
-		return *event
-	case *events.PageBugActivated:
-		return *event
-	case *events.PageBugTriggered:
-		return *event
-	case *events.BugFixSubmitted:
-		return *event
-	case *events.PageBugFixed:
-		return *event
-	case *events.BugFixRejected:
-		return *event
-	case *events.DeploymentDefined:
-		return *event
-	case *events.DeploymentUnlocked:
-		return *event
-	case *events.DeploymentStarted:
-		return *event
-	case *events.DeploymentCompleted:
-		return *event
-	case *events.DeploymentFailed:
-		return *event
-	case *events.DeploymentPageLoadEffectDefined:
-		return *event
-	case *events.DeploymentBugProbabilityEffectDefined:
-		return *event
-	case *events.DeploymentFutureDurationEffectDefined:
-		return *event
-	case *events.DeploymentNewBugEffectDefined:
-		return *event
-	case *events.PageLoadChanged:
-		return *event
-	case *events.PageBugProbabilityChanged:
-		return *event
-	case *events.DeploymentDurationChanged:
-		return *event
-	case *events.OperationQueued:
-		return *event
-	case *events.OperationStarted:
-		return *event
-	case *events.OperationProgressed:
-		return *event
-	case *events.OperationSucceeded:
-		return *event
-	case *events.OperationFailed:
-		return *event
-	case *events.InfrastructureCostAccrued:
-		return *event
-	case *events.EconomyConfigured:
-		return *event
-	case *events.DeploymentCostAccrued:
-		return *event
-	case *events.RevenueLost:
-		return *event
-	case *events.TrafficAttackStarted:
-		return *event
-	case *events.TrafficAttackEnded:
-		return *event
-	case *events.TrafficAttackMitigated:
-		return *event
-	case *events.ExternalProviderDegraded:
-		return *event
-	case *events.ExternalProviderRecovered:
-		return *event
-	default:
-		return event
+	value := reflect.ValueOf(event)
+	if value.Kind() == reflect.Pointer && !value.IsNil() {
+		if dereferenced, ok := value.Elem().Interface().(events.Event); ok {
+			return dereferenced
+		}
 	}
+	return event
 }
 
 var eventFactories = map[string]func() events.Event{
-	"WorldCreated":                          func() events.Event { return &events.WorldCreated{} },
-	"ProductAdded":                          func() events.Event { return &events.ProductAdded{} },
-	"ProductPurchased":                      func() events.Event { return &events.ProductPurchased{} },
-	"TimeAdvanced":                          func() events.Event { return &events.TimeAdvanced{} },
-	"PageConfigured":                        func() events.Event { return &events.PageConfigured{} },
-	"InfrastructureConfigured":              func() events.Event { return &events.InfrastructureConfigured{} },
-	"RunEnded":                              func() events.Event { return &events.RunEnded{} },
-	"VisitorArrived":                        func() events.Event { return &events.VisitorArrived{} },
-	"ProductSelected":                       func() events.Event { return &events.ProductSelected{} },
-	"PurchaseIntentCreated":                 func() events.Event { return &events.PurchaseIntentCreated{} },
-	"VisitorJourneyCompleted":               func() events.Event { return &events.VisitorJourneyCompleted{} },
-	"PageRequestStarted":                    func() events.Event { return &events.PageRequestStarted{} },
-	"PageRequestAccepted":                   func() events.Event { return &events.PageRequestAccepted{} },
-	"CapacityAllocationReleased":            func() events.Event { return &events.CapacityAllocationReleased{} },
-	"PageRequestCompleted":                  func() events.Event { return &events.PageRequestCompleted{} },
-	"PageRequestRejected":                   func() events.Event { return &events.PageRequestRejected{} },
-	"BackendScaleRequested":                 func() events.Event { return &events.BackendScaleRequested{} },
-	"ServerProvisioningStarted":             func() events.Event { return &events.ServerProvisioningStarted{} },
-	"ServerActivated":                       func() events.Event { return &events.ServerActivated{} },
-	"ServerDrainingStarted":                 func() events.Event { return &events.ServerDrainingStarted{} },
-	"ServerRemoved":                         func() events.Event { return &events.ServerRemoved{} },
-	"ServerProvisioningFailed":              func() events.Event { return &events.ServerProvisioningFailed{} },
-	"PageBugActivated":                      func() events.Event { return &events.PageBugActivated{} },
-	"PageBugTriggered":                      func() events.Event { return &events.PageBugTriggered{} },
-	"BugFixSubmitted":                       func() events.Event { return &events.BugFixSubmitted{} },
-	"PageBugFixed":                          func() events.Event { return &events.PageBugFixed{} },
-	"BugFixRejected":                        func() events.Event { return &events.BugFixRejected{} },
-	"DeploymentDefined":                     func() events.Event { return &events.DeploymentDefined{} },
-	"DeploymentUnlocked":                    func() events.Event { return &events.DeploymentUnlocked{} },
-	"DeploymentStarted":                     func() events.Event { return &events.DeploymentStarted{} },
-	"DeploymentCompleted":                   func() events.Event { return &events.DeploymentCompleted{} },
-	"DeploymentFailed":                      func() events.Event { return &events.DeploymentFailed{} },
-	"DeploymentPageLoadEffectDefined":       func() events.Event { return &events.DeploymentPageLoadEffectDefined{} },
-	"DeploymentBugProbabilityEffectDefined": func() events.Event { return &events.DeploymentBugProbabilityEffectDefined{} },
-	"DeploymentFutureDurationEffectDefined": func() events.Event { return &events.DeploymentFutureDurationEffectDefined{} },
-	"DeploymentNewBugEffectDefined":         func() events.Event { return &events.DeploymentNewBugEffectDefined{} },
-	"PageLoadChanged":                       func() events.Event { return &events.PageLoadChanged{} },
-	"PageBugProbabilityChanged":             func() events.Event { return &events.PageBugProbabilityChanged{} },
-	"DeploymentDurationChanged":             func() events.Event { return &events.DeploymentDurationChanged{} },
-	"OperationQueued":                       func() events.Event { return &events.OperationQueued{} },
-	"OperationStarted":                      func() events.Event { return &events.OperationStarted{} },
-	"OperationProgressed":                   func() events.Event { return &events.OperationProgressed{} },
-	"OperationSucceeded":                    func() events.Event { return &events.OperationSucceeded{} },
-	"OperationFailed":                       func() events.Event { return &events.OperationFailed{} },
-	"InfrastructureCostAccrued":             func() events.Event { return &events.InfrastructureCostAccrued{} },
-	"EconomyConfigured":                     func() events.Event { return &events.EconomyConfigured{} },
-	"DeploymentCostAccrued":                 func() events.Event { return &events.DeploymentCostAccrued{} },
-	"RevenueLost":                           func() events.Event { return &events.RevenueLost{} },
-	"TrafficAttackStarted":                  func() events.Event { return &events.TrafficAttackStarted{} },
-	"TrafficAttackEnded":                    func() events.Event { return &events.TrafficAttackEnded{} },
-	"TrafficAttackMitigated":                func() events.Event { return &events.TrafficAttackMitigated{} },
-	"ExternalProviderDegraded":              func() events.Event { return &events.ExternalProviderDegraded{} },
-	"ExternalProviderRecovered":             func() events.Event { return &events.ExternalProviderRecovered{} },
+	"CostsConfigured":                   func() events.Event { return &events.CostsConfigured{} },
+	"ServerCommandAccepted":             func() events.Event { return &events.ServerCommandAccepted{} },
+	"ControlCommandAccepted":            func() events.Event { return &events.ControlCommandAccepted{} },
+	"ControlCommandResponseRecorded":    func() events.Event { return &events.ControlCommandResponseRecorded{} },
+	"ControlOperationResultRecorded":    func() events.Event { return &events.ControlOperationResultRecorded{} },
+	"ServerCredentialIssued":            func() events.Event { return &events.ServerCredentialIssued{} },
+	"ServerCredentialRotationRequested": func() events.Event { return &events.ServerCredentialRotationRequested{} },
+	"WorldCreated":                      func() events.Event { return &events.WorldCreated{} },
+	"ProductAdded":                      func() events.Event { return &events.ProductAdded{} },
+	"InboxMessageDelivered":             func() events.Event { return &events.InboxMessageDelivered{} },
+	"TimeAdvanced":                      func() events.Event { return &events.TimeAdvanced{} },
+	"PageConfigured":                    func() events.Event { return &events.PageConfigured{} },
+	"InfrastructureConfigured":          func() events.Event { return &events.InfrastructureConfigured{} },
+	"RunEnded":                          func() events.Event { return &events.RunEnded{} },
+	"VisitorArrived":                    func() events.Event { return &events.VisitorArrived{} },
+	"ProductSelected":                   func() events.Event { return &events.ProductSelected{} },
+	"VisitorJourneyCompleted":           func() events.Event { return &events.VisitorJourneyCompleted{} },
+	"PageRequestStarted":                func() events.Event { return &events.PageRequestStarted{} },
+	"PageRequestAccepted":               func() events.Event { return &events.PageRequestAccepted{} },
+	"PageRequestCompleted":              func() events.Event { return &events.PageRequestCompleted{} },
+	"PageRequestRejected":               func() events.Event { return &events.PageRequestRejected{} },
+	"ServerProvisioningStarted":         func() events.Event { return &events.ServerProvisioningStarted{} },
+	"ServerActivated":                   func() events.Event { return &events.ServerActivated{} },
+	"ServerDrainingStarted":             func() events.Event { return &events.ServerDrainingStarted{} },
+	"ServerRemoved":                     func() events.Event { return &events.ServerRemoved{} },
+	"ServerProvisioningFailed":          func() events.Event { return &events.ServerProvisioningFailed{} },
+	"BackendAvailabilityChanged":        func() events.Event { return &events.BackendAvailabilityChanged{} },
+	"OperationQueued":                   func() events.Event { return &events.OperationQueued{} },
+	"OperationStarted":                  func() events.Event { return &events.OperationStarted{} },
+	"OperationProgressed":               func() events.Event { return &events.OperationProgressed{} },
+	"OperationSucceeded":                func() events.Event { return &events.OperationSucceeded{} },
+	"OperationFailed":                   func() events.Event { return &events.OperationFailed{} },
+	"InfrastructureCostAccrued":         func() events.Event { return &events.InfrastructureCostAccrued{} },
+	"TrafficAttackStarted":              func() events.Event { return &events.TrafficAttackStarted{} },
+	"TrafficAttackEnded":                func() events.Event { return &events.TrafficAttackEnded{} },
+	"FirewallRuleUpserted":              func() events.Event { return &events.FirewallRuleUpserted{} },
+	"FirewallRuleDeleted":               func() events.Event { return &events.FirewallRuleDeleted{} },
+	"FirewallRequestEvaluated":          func() events.Event { return &events.FirewallRequestEvaluated{} },
+	"FirewallAvailabilityChanged":       func() events.Event { return &events.FirewallAvailabilityChanged{} },
+	"ServerTypeDefined":                 func() events.Event { return &events.ServerTypeDefined{} },
+	"DatabaseCreated":                   func() events.Event { return &events.DatabaseCreated{} },
+	"DatabaseDeleted":                   func() events.Event { return &events.DatabaseDeleted{} },
+	"DatabaseConnectionOpened":          func() events.Event { return &events.DatabaseConnectionOpened{} },
+	"DatabaseConnectionReleased":        func() events.Event { return &events.DatabaseConnectionReleased{} },
+	"DatabaseConnectionRejected":        func() events.Event { return &events.DatabaseConnectionRejected{} },
+	"DatabaseAvailabilityChanged":       func() events.Event { return &events.DatabaseAvailabilityChanged{} },
+	"DatabaseGrowthRequested":           func() events.Event { return &events.DatabaseGrowthRequested{} },
+	"DatabaseStorageIncreased":          func() events.Event { return &events.DatabaseStorageIncreased{} },
+	"DatabaseGrowthBlocked":             func() events.Event { return &events.DatabaseGrowthBlocked{} },
+	"DiskLogsCleaned":                   func() events.Event { return &events.DiskLogsCleaned{} },
+	"DiskLogsGrowthRequested":           func() events.Event { return &events.DiskLogsGrowthRequested{} },
+	"DiskLogsIncreased":                 func() events.Event { return &events.DiskLogsIncreased{} },
+	"DiskLogsGrowthBlocked":             func() events.Event { return &events.DiskLogsGrowthBlocked{} },
+	"DatabaseBackupStarted":             func() events.Event { return &events.DatabaseBackupStarted{} },
+	"DatabaseBackupCompleted":           func() events.Event { return &events.DatabaseBackupCompleted{} },
+	"DatabaseBackupFailed":              func() events.Event { return &events.DatabaseBackupFailed{} },
+	"BackupStorageCostAccrued":          func() events.Event { return &events.BackupStorageCostAccrued{} },
+	"DatabaseRestoreStarted":            func() events.Event { return &events.DatabaseRestoreStarted{} },
+	"DatabaseRestoreCompleted":          func() events.Event { return &events.DatabaseRestoreCompleted{} },
+	"DatabaseRestoreFailed":             func() events.Event { return &events.DatabaseRestoreFailed{} },
+	"SiteStopStarted":                   func() events.Event { return &events.SiteStopStarted{} },
+	"SiteStopped":                       func() events.Event { return &events.SiteStopped{} },
+	"SiteDatabaseChanged":               func() events.Event { return &events.SiteDatabaseChanged{} },
+	"SiteStarted":                       func() events.Event { return &events.SiteStarted{} },
 }

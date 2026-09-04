@@ -22,7 +22,7 @@ func main() {
 
 func run() error {
 	seed := flag.Int64("seed", 0, "positive deterministic world seed")
-	profilePath := flag.String("config", "config/world-generation.v1.yaml", "world generation profile")
+	profilePath := flag.String("config", "config/world-generation.v2.yaml", "world generation profile")
 	databasePath := flag.String("db", "data/catalog.db", "SQLite catalog database path")
 	flag.Parse()
 	if *seed <= 0 {
@@ -60,10 +60,6 @@ func run() error {
 	fmt.Printf("bootstrap_events=%d\n", len(world.Bootstrap))
 	fmt.Printf("scheduled_events=%d\n", len(world.Events))
 	fmt.Printf("schedule_hash=%s\n", world.ScheduleHash)
-	fmt.Printf("maximum_balance_minor=%d\n", world.Evaluation.MaximumBalanceMinor)
-	fmt.Printf("maximum_revenue_minor=%d\n", world.Evaluation.MaximumRevenueMinor)
-	fmt.Printf("minimum_real_time=%s\n", world.Evaluation.MinimumRealTime)
-	fmt.Printf("agent_request_count=%d\n", world.Evaluation.AgentRequestCount)
 	minimum, maximum, average := dailyVisitors(world.StartsAt, world.EndsAt, world.Events)
 	fmt.Printf("daily_visitors_min=%d\n", minimum)
 	fmt.Printf("daily_visitors_max=%d\n", maximum)

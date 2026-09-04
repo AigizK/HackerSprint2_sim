@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1180">
+  <meta name="color-scheme" content="light">
+  <title>Uptick · Simulation Operations</title>
+  <link rel="stylesheet" href="/ui/assets/app.css">
+</head>
+<body>
+  <header class="global-header">
+    <a class="brand" href="/ui/" data-link>
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><strong>UPTICK</strong><small>SIMULATION OPERATIONS</small></span>
+    </a>
+    <nav class="global-nav" aria-label="Основная навигация">
+      <a href="/ui/" data-link data-nav="start">Новый run</a>
+      <a href="/ui/history" data-link data-nav="history">История</a>
+      <a href="/debug/">Debug</a>
+    </nav>
+    <div class="api-state"><span></span> Simulator API</div>
+  </header>
+  <main id="app" class="app-shell" aria-live="polite">
+    <div class="page-loading"><span class="loader"></span> Загружаем рабочее пространство…</div>
+  </main>
+  <div id="toast-root" class="toast-root" aria-live="assertive"></div>
+  <dialog id="confirm-dialog" class="confirm-dialog">
+    <form method="dialog">
+      <div class="dialog-icon">!</div>
+      <h2 id="dialog-title">Подтвердите действие</h2>
+      <p id="dialog-copy"></p>
+      <div class="dialog-actions">
+        <button value="cancel" class="button secondary">Отмена</button>
+        <button value="confirm" class="button danger">Продолжить</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="/ui/assets/app.js" defer></script>
+</body>
+</html>

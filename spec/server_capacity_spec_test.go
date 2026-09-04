@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/logs"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
@@ -32,6 +33,8 @@ func TestRequestsWithinServerCapacityAreSuccessful(t *testing.T) {
 		acceptedRequestEvents(firstRequestID, "visitor-1", 50, worldStartsAt),
 		acceptedRequestEvents(secondRequestID, "visitor-2", 50, worldStartsAt)...,
 	)
+	wantEvents = append(wantEvents, events.BackendAvailabilityChanged{Available: false,
+		UnavailablePages: []model.PageType{model.PageProductList}, ChangedAt: worldStartsAt})
 	s.Then(
 		s.Events.Exactly(wantEvents...),
 		s.Logs.Exactly(
@@ -63,13 +66,21 @@ func TestRequestExceedingServerCapacityIsRejected(t *testing.T) {
 	s.Then(
 		s.Events.Exactly(
 			events.PageRequestStarted{
-				RequestID: rejectedRequestID,
-				Source:    model.RequestSourceVisitor,
-				VisitorID: "visitor-2",
-				Page:      model.PageProductList,
-				LoadUnits: 60,
-				StartedAt: worldStartsAt,
+				RequestID:  rejectedRequestID,
+				Source:     model.RequestSourceVisitor,
+				VisitorID:  "visitor-2",
+				Page:       model.PageProductList,
+				SourceIP:   simulation.VisitorClientProfile(42, "visitor-2").SourceIP,
+				UserAgent:  simulation.VisitorClientProfile(42, "visitor-2").UserAgent,
+				RegionCode: simulation.VisitorClientProfile(42, "visitor-2").RegionCode,
+				LoadUnits:  60,
+				StartedAt:  worldStartsAt,
 			},
+			events.FirewallRequestEvaluated{RequestID: rejectedRequestID,
+				SourceIP:   simulation.VisitorClientProfile(42, "visitor-2").SourceIP,
+				UserAgent:  simulation.VisitorClientProfile(42, "visitor-2").UserAgent,
+				RegionCode: simulation.VisitorClientProfile(42, "visitor-2").RegionCode,
+				Action:     model.FirewallAllow, EvaluatedAt: worldStartsAt},
 			events.PageRequestRejected{
 				RequestID:  rejectedRequestID,
 				StatusCode: 500,
@@ -109,10 +120,10 @@ func TestCapacityIsAvailableAfterRequestHoldDuration(t *testing.T) {
 		s.User.OpensPage(afterReleaseRequestID, "visitor-2", model.PageProductList, ""),
 	)
 
+	wantEvents := append(acceptedRequestEvents(afterReleaseRequestID, "visitor-2", capacityServerUnits, worldStartsAt.Add(capacityHoldDuration)),
+		events.BackendAvailabilityChanged{Available: false, UnavailablePages: []model.PageType{model.PageProductList}, ChangedAt: worldStartsAt.Add(capacityHoldDuration)})
 	s.Then(
-		s.Events.Exactly(
-			acceptedRequestEvents(afterReleaseRequestID, "visitor-2", capacityServerUnits, worldStartsAt.Add(capacityHoldDuration))...,
-		),
+		s.Events.Exactly(wantEvents...),
 		s.Logs.Exactly(
 			capacityLog(firstRequestID, "visitor-1", worldStartsAt, 200, "", ""),
 			capacityLog(afterReleaseRequestID, "visitor-2", worldStartsAt.Add(capacityHoldDuration), 200, "", ""),
@@ -133,24 +144,34 @@ func newCapacityScenario(t *testing.T, runID string, pageLoadUnits int64) *spec.
 }
 
 func acceptedRequestEvents(requestID model.RequestID, visitorID model.VisitorID, loadUnits int64, at time.Time) []events.Event {
+	return acceptedRequestEventsOnServer(requestID, visitorID, loadUnits, at, capacityServerID)
+}
+
+func acceptedRequestEventsOnServer(requestID model.RequestID, visitorID model.VisitorID, loadUnits int64, at time.Time, serverID model.ServerID) []events.Event {
+	profile := simulation.VisitorClientProfile(42, visitorID)
 	return []events.Event{
 		events.PageRequestStarted{
-			RequestID: requestID,
-			Source:    model.RequestSourceVisitor,
-			VisitorID: visitorID,
-			Page:      model.PageProductList,
-			LoadUnits: loadUnits,
-			StartedAt: at,
+			RequestID:  requestID,
+			Source:     model.RequestSourceVisitor,
+			VisitorID:  visitorID,
+			Page:       model.PageProductList,
+			SourceIP:   profile.SourceIP,
+			UserAgent:  profile.UserAgent,
+			RegionCode: profile.RegionCode,
+			LoadUnits:  loadUnits,
+			StartedAt:  at,
 		},
+		events.FirewallRequestEvaluated{RequestID: requestID, SourceIP: profile.SourceIP, UserAgent: profile.UserAgent,
+			RegionCode: profile.RegionCode, Action: model.FirewallAllow, EvaluatedAt: at},
 		events.PageRequestAccepted{
 			RequestID:  requestID,
-			ServerID:   capacityServerID,
+			ServerID:   serverID,
 			AcceptedAt: at,
 			ReleasesAt: at.Add(capacityHoldDuration),
 		},
 		events.PageRequestCompleted{
 			RequestID:   requestID,
-			ServerID:    capacityServerID,
+			ServerID:    serverID,
 			StatusCode:  200,
 			CompletedAt: at,
 		},
@@ -165,12 +186,16 @@ func capacityLog(
 	errorCode model.RequestFailureCode,
 	message string,
 ) logs.Entry {
+	profile := simulation.VisitorClientProfile(42, visitorID)
 	return logs.Entry{
 		Timestamp:  at,
 		RequestID:  requestID,
 		Source:     model.RequestSourceVisitor,
 		VisitorID:  visitorID,
 		Page:       model.PageProductList,
+		SourceIP:   profile.SourceIP,
+		UserAgent:  profile.UserAgent,
+		RegionCode: profile.RegionCode,
 		StatusCode: statusCode,
 		ErrorCode:  errorCode,
 		Message:    message,

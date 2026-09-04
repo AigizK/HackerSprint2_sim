@@ -1,6 +1,7 @@
 package simulation
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
@@ -19,21 +20,13 @@ type CreateWorld struct {
 func (CreateWorld) commandType() string { return "CreateWorld" }
 
 type AddProduct struct {
-	ProductID              ProductID
-	Name                   string
-	PriceMinor             int64
-	ViewProbabilityPPM     uint32
-	PurchaseProbabilityPPM uint32
+	ProductID          ProductID
+	Name               string
+	PriceMinor         int64
+	ViewProbabilityPPM uint32
 }
 
 func (AddProduct) commandType() string { return "AddProduct" }
-
-type PurchaseProduct struct {
-	PurchaseID PurchaseID
-	ProductID  ProductID
-}
-
-func (PurchaseProduct) commandType() string { return "PurchaseProduct" }
 
 type AdvanceTime struct {
 	CommandID         model.CommandID
@@ -43,23 +36,18 @@ type AdvanceTime struct {
 
 func (AdvanceTime) commandType() string { return "AdvanceTime" }
 
-// OpenPage executes a visitor request against the current page, bug and capacity state.
+// OpenPage executes a visitor request against the current page and capacity state.
 type OpenPage struct {
-	RequestID model.RequestID
-	VisitorID model.VisitorID
-	Page      model.PageType
-	ProductID model.ProductID
+	RequestID  model.RequestID
+	VisitorID  model.VisitorID
+	Page       model.PageType
+	ProductID  model.ProductID
+	SourceIP   string
+	UserAgent  string
+	RegionCode model.RegionCode
 }
 
 func (OpenPage) commandType() string { return "OpenPage" }
-
-// ApplyFix submits a diagnostic message that may resolve an active page bug.
-type ApplyFix struct {
-	CommandID model.CommandID
-	Message   string
-}
-
-func (ApplyFix) commandType() string { return "ApplyFix" }
 
 type AddServer struct {
 	CommandID        model.CommandID
@@ -78,22 +66,6 @@ type RemoveServer struct {
 }
 
 func (RemoveServer) commandType() string { return "RemoveServer" }
-
-type StartDeployment struct {
-	CommandID    model.CommandID
-	DeploymentID model.DeploymentID
-	OperationID  model.OperationID
-}
-
-func (StartDeployment) commandType() string { return "StartDeployment" }
-
-type SetBackendDesiredInstances struct {
-	CommandID        model.CommandID
-	OperationID      model.OperationID
-	DesiredInstances int
-}
-
-func (SetBackendDesiredInstances) commandType() string { return "SetBackendDesiredInstances" }
 
 type ProbePage struct {
 	RequestID model.RequestID
@@ -115,3 +87,139 @@ type SynchronizeRealTime struct {
 }
 
 func (SynchronizeRealTime) commandType() string { return "SynchronizeRealTime" }
+
+// ConfigureServerCatalog defines the four infrastructure SKUs for a run.
+// XBytes is the db.small disk size; medium and large use 2X and 4X.
+type ConfigureServerCatalog struct {
+	XBytes                   int64
+	BackendCapacityUnits     int64
+	BackendCostPerMonthMinor int64
+}
+
+func (ConfigureServerCatalog) commandType() string { return "ConfigureServerCatalog" }
+
+type AddTypedServer struct {
+	CommandID    model.CommandID
+	OperationID  model.OperationID
+	ServerID     model.ServerID
+	Name         string
+	CredentialID model.CredentialID
+	InstanceType model.InstanceType
+}
+
+func (AddTypedServer) commandType() string { return "AddTypedServer" }
+
+type CreateDatabase struct {
+	CommandID  model.CommandID
+	DatabaseID model.DatabaseID
+	ServerID   model.ServerID
+	Name       string
+}
+
+func (CreateDatabase) commandType() string { return "CreateDatabase" }
+
+type GrowDatabase struct {
+	CommandID      model.CommandID
+	GrowthID       model.GrowthID
+	DataDeltaBytes int64
+	LogsDeltaBytes int64
+}
+
+func (GrowDatabase) commandType() string { return "GrowDatabase" }
+
+type CleanupDatabaseLogs struct {
+	CommandID model.CommandID
+	ServerID  model.ServerID
+}
+
+func (CleanupDatabaseLogs) commandType() string { return "CleanupDatabaseLogs" }
+
+type BackupDatabase struct {
+	CommandID   model.CommandID
+	OperationID model.OperationID
+	BackupID    model.BackupID
+	DatabaseID  model.DatabaseID
+	Fail        bool
+}
+
+func (BackupDatabase) commandType() string { return "BackupDatabase" }
+
+type RestoreDatabase struct {
+	CommandID   model.CommandID
+	OperationID model.OperationID
+	BackupID    model.BackupID
+	DatabaseID  model.DatabaseID
+	Fail        bool
+}
+
+func (RestoreDatabase) commandType() string { return "RestoreDatabase" }
+
+type StopSite struct {
+	CommandID   model.CommandID
+	OperationID model.OperationID
+}
+
+func (StopSite) commandType() string { return "StopSite" }
+
+type StartSite struct{ CommandID model.CommandID }
+
+func (StartSite) commandType() string { return "StartSite" }
+
+type SetSiteDatabase struct {
+	CommandID                 model.CommandID
+	DatabaseID                model.DatabaseID
+	ExpectedCurrentDatabaseID model.DatabaseID
+}
+
+func (SetSiteDatabase) commandType() string { return "SetSiteDatabase" }
+
+type UpsertFirewallRule struct {
+	CommandID model.CommandID
+	Rule      model.FirewallRule
+}
+
+func (UpsertFirewallRule) commandType() string { return "UpsertFirewallRule" }
+
+type DeleteFirewallRule struct {
+	CommandID model.CommandID
+	RuleID    model.FirewallRuleID
+}
+
+func (DeleteFirewallRule) commandType() string { return "DeleteFirewallRule" }
+
+type RecordControlCommandResponse struct {
+	CommandID     model.CommandID
+	Command       string
+	PayloadSHA256 string
+	Params        json.RawMessage
+	StatusCode    int
+	OperationID   model.OperationID
+	Result        json.RawMessage
+	ErrorCode     string
+	Message       string
+}
+
+func (RecordControlCommandResponse) commandType() string { return "RecordControlCommandResponse" }
+
+type RecordControlOperationResult struct {
+	OperationID model.OperationID
+	CommandID   model.CommandID
+	Command     string
+	Result      json.RawMessage
+	ErrorCode   string
+	Message     string
+}
+
+func (RecordControlOperationResult) commandType() string { return "RecordControlOperationResult" }
+
+type IssueServerCredential struct {
+	CredentialID           model.CredentialID
+	ServerID               model.ServerID
+	Version                uint64
+	SupersedesCredentialID model.CredentialID
+	ValidFrom              time.Time
+	ExpiresAt              time.Time
+	MessageID              model.MessageID
+}
+
+func (IssueServerCredential) commandType() string { return "IssueServerCredential" }

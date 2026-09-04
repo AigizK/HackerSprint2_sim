@@ -3,11 +3,13 @@ package application
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"reflect"
 	"time"
 
+	"github.com/aigizk/hackersprint2-sim/internal/controlauth"
 	"github.com/aigizk/hackersprint2-sim/internal/persistence/journal"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/events"
@@ -25,8 +27,28 @@ var (
 type Catalog interface {
 	generator.WorldRepository
 	simulation.RunRepository
+	controlauth.Repository
+	controlauth.ServerCredentialRepository
 	FindManualWorld(ctx context.Context, seed int64) (generator.WorldDefinition, error)
 	GetWorld(ctx context.Context, worldID string) (generator.WorldDefinition, error)
+}
+
+// AuthenticateControlPanel validates the run-scoped HTTP Basic credentials
+// returned by /v2/start.
+func (s *StartRunService) AuthenticateControlPanel(ctx context.Context, runID, username, password string) error {
+	if _, err := s.catalog.GetRun(ctx, runID); err != nil {
+		return err
+	}
+	credentials, err := s.catalog.GetOrCreateControlPanelCredentials(ctx, runID)
+	if err != nil {
+		return err
+	}
+	usernameOK := subtle.ConstantTimeCompare([]byte(username), []byte(credentials.Username))
+	passwordOK := subtle.ConstantTimeCompare([]byte(password), []byte(credentials.Password))
+	if usernameOK&passwordOK != 1 {
+		return ErrControlUnauthorized
+	}
+	return nil
 }
 
 type StartRunRequest struct {
@@ -37,9 +59,10 @@ type StartRunRequest struct {
 }
 
 type StartRunResult struct {
-	Run     simulation.RunRecord
-	State   simulation.State
-	Created bool
+	Run              simulation.RunRecord
+	State            simulation.State
+	Created          bool
+	ControlPanelAuth controlauth.Credentials `json:"-"`
 }
 
 type StartRunService struct {
@@ -94,15 +117,7 @@ func (s *StartRunService) Start(ctx context.Context, request StartRunRequest) (S
 		return StartRunResult{}, ErrInvalidRequest
 	}
 	if existing, err := s.catalog.FindByStartRequest(ctx, request.AgentID, request.AgentVersion, request.RequestID); err == nil {
-		world, worldErr := s.catalog.GetWorld(ctx, existing.WorldID)
-		if worldErr != nil {
-			return StartRunResult{}, worldErr
-		}
-		if world.Key.Seed != request.Seed {
-			return StartRunResult{}, ErrIdempotencyConflict
-		}
-		state, err := s.initialize(ctx, existing, world)
-		return StartRunResult{Run: existing, State: state, Created: false}, err
+		return s.resumeStart(ctx, existing, request.Seed)
 	} else if !errors.Is(err, simulation.ErrRunNotFound) {
 		return StartRunResult{}, err
 	}
@@ -124,17 +139,67 @@ func (s *StartRunService) Start(ctx context.Context, request StartRunRequest) (S
 		if err := s.catalog.CreateRun(ctx, run); err != nil {
 			if errors.Is(err, simulation.ErrRunAlreadyExists) {
 				if existing, findErr := s.catalog.FindByStartRequest(ctx, request.AgentID, request.AgentVersion, request.RequestID); findErr == nil {
-					state, initErr := s.initialize(ctx, existing, world)
-					return StartRunResult{Run: existing, State: state}, initErr
+					// Another start may have won with the same key but a different seed.
+					return s.resumeStart(ctx, existing, request.Seed)
 				}
 				continue
 			}
 			return StartRunResult{}, err
 		}
-		state, err := s.initialize(ctx, run, world)
-		return StartRunResult{Run: run, State: state, Created: true}, err
+		return s.startResult(ctx, run, world, true)
 	}
 	return StartRunResult{}, fmt.Errorf("allocate run id: %w", simulation.ErrRunAlreadyExists)
+}
+
+func (s *StartRunService) resumeStart(ctx context.Context, run simulation.RunRecord, seed int64) (StartRunResult, error) {
+	world, err := s.catalog.GetWorld(ctx, run.WorldID)
+	if err != nil {
+		return StartRunResult{}, err
+	}
+	if world.Key.Seed != seed {
+		return StartRunResult{}, ErrIdempotencyConflict
+	}
+	if seed > 0 {
+		// Generated worlds store metadata only. Rebuild the immutable definition
+		// before validating/recovering the journal, just as on the initial start.
+		if s.generator == nil {
+			return StartRunResult{}, ErrInvalidRequest
+		}
+		key, err := s.generator.Key(seed)
+		if err != nil {
+			return StartRunResult{}, err
+		}
+		if key != world.Key {
+			return StartRunResult{}, generator.ErrWorldIntegrity
+		}
+		world, _, err = s.generator.GetOrCreate(ctx, s.catalog, seed)
+		if err != nil {
+			return StartRunResult{}, err
+		}
+	}
+	return s.startResult(ctx, run, world, false)
+}
+
+func (s *StartRunService) startResult(ctx context.Context, run simulation.RunRecord, world generator.WorldDefinition, created bool) (StartRunResult, error) {
+	state, err := s.initialize(ctx, run, world)
+	if err != nil {
+		return StartRunResult{}, err
+	}
+	credentials, err := s.catalog.GetOrCreateControlPanelCredentials(ctx, run.RunID)
+	if err != nil {
+		return StartRunResult{}, err
+	}
+	if state.Status == simulation.RunRunning {
+		session, openErr := simulation.OpenRunSession(ctx, s.store, run.RunID)
+		if openErr != nil {
+			return StartRunResult{}, openErr
+		}
+		if ensureErr := ensureServerCredentials(ctx, s.catalog, session); ensureErr != nil {
+			return StartRunResult{}, ensureErr
+		}
+		state = session.State()
+	}
+	return StartRunResult{Run: run, State: state, Created: created, ControlPanelAuth: credentials}, nil
 }
 
 func (s *StartRunService) world(ctx context.Context, seed int64) (generator.WorldDefinition, error) {

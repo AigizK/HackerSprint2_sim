@@ -23,7 +23,6 @@ type persistedManualWorld struct {
 	StartsAt       string                    `json:"starts_at"`
 	EndsAt         string                    `json:"ends_at"`
 	CreatedAt      string                    `json:"created_at"`
-	Evaluation     generator.WorldEvaluation `json:"evaluation"`
 	Bootstrap      []persistedEvent          `json:"bootstrap"`
 	Events         []persistedScheduledEvent `json:"events"`
 }
@@ -42,7 +41,7 @@ func encodePersistedEvent(event events.Event) (persistedEvent, error) {
 func encodeManualWorld(world generator.WorldDefinition) ([]byte, error) {
 	persisted := persistedManualWorld{WorldID: world.WorldID, Key: world.Key, ProfileVersion: world.ProfileVersion,
 		ScheduleHash: world.ScheduleHash, Source: world.Source, StartsAt: formatTime(world.StartsAt), EndsAt: formatTime(world.EndsAt),
-		CreatedAt: formatTime(world.CreatedAt), Evaluation: world.Evaluation}
+		CreatedAt: formatTime(world.CreatedAt)}
 	for _, event := range world.Bootstrap {
 		encoded, err := encodePersistedEvent(event)
 		if err != nil {
@@ -69,7 +68,7 @@ func decodeManualWorld(payload []byte) (generator.WorldDefinition, error) {
 		return generator.WorldDefinition{}, fmt.Errorf("decode manual world definition: %w", err)
 	}
 	world := generator.WorldDefinition{WorldID: persisted.WorldID, Key: persisted.Key, ProfileVersion: persisted.ProfileVersion,
-		ScheduleHash: persisted.ScheduleHash, Source: persisted.Source, Evaluation: persisted.Evaluation}
+		ScheduleHash: persisted.ScheduleHash, Source: persisted.Source}
 	var err error
 	if world.StartsAt, err = parseTime(persisted.StartsAt); err != nil {
 		return generator.WorldDefinition{}, err

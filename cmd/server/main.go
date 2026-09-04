@@ -15,6 +15,7 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/debugui"
 	"github.com/aigizk/hackersprint2-sim/internal/httpapi"
 	"github.com/aigizk/hackersprint2-sim/internal/persistence"
+	"github.com/aigizk/hackersprint2-sim/internal/playerui"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/generator"
 )
 
@@ -28,7 +29,7 @@ func main() {
 func run() error {
 	address := flag.String("addr", ":8080", "HTTP listen address")
 	dataPath := flag.String("data", "data", "storage root")
-	profilePath := flag.String("config", "config/world-generation.v1.yaml", "world generation profile")
+	profilePath := flag.String("config", "config/world-generation.v2.yaml", "world generation profile")
 	maxCachedRuns := flag.Int("max-cached-runs", 8, "maximum number of active runs cached in memory")
 	flag.Parse()
 
@@ -48,12 +49,15 @@ func run() error {
 
 	manager := application.NewRunManager(storage.Catalog, storage.Journal, storage.Journal, *maxCachedRuns)
 	startService := application.NewStartRunService(storage.Catalog, storage.Journal, worldGenerator, storage.Journal)
-	runService := application.NewRunService(manager)
+	runService := application.NewRunService(manager, storage.Catalog)
 	debugQuery := application.NewDebugQuery(storage.Catalog, storage.Journal, storage.Journal)
 	debugHandler := debugui.New(debugQuery)
+	playerHandler := playerui.New(debugQuery)
 	rootHandler := http.NewServeMux()
 	rootHandler.Handle("/debug", debugHandler)
 	rootHandler.Handle("/debug/", debugHandler)
+	rootHandler.Handle("/ui", playerHandler)
+	rootHandler.Handle("/ui/", playerHandler)
 	rootHandler.Handle("/", httpapi.New(startService, runService))
 
 	server := &http.Server{

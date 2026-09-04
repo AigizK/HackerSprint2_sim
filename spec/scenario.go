@@ -2,12 +2,9 @@ package spec
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"reflect"
-	"sort"
 	"testing"
 	"time"
 
@@ -30,21 +27,20 @@ type Scenario struct {
 	emitted []events.Event
 	logs    []logs.Entry
 	future  FutureDriver
+	inbox   InboxFutureDriver
 
-	World       WorldDSL
-	Product     ProductDSL
-	Page        PageDSL
-	Server      ServerDSL
-	User        UserDSL
-	Visitor     VisitorDSL
-	Bug         BugDSL
-	Deployment  DeploymentDSL
-	Time        TimeDSL
-	State       StateDSL
-	Events      EventsDSL
-	Logs        LogsDSL
-	Deployments DeploymentsDSL
-	Future      FutureDSL
+	World   WorldDSL
+	Product ProductDSL
+	Page    PageDSL
+	Server  ServerDSL
+	User    UserDSL
+	Visitor VisitorDSL
+	Time    TimeDSL
+	State   StateDSL
+	Events  EventsDSL
+	Logs    LogsDSL
+	Future  FutureDSL
+	Inbox   InboxFutureDSL
 }
 
 func New(t *testing.T, runID string) *Scenario {
@@ -59,6 +55,7 @@ func New(t *testing.T, runID string) *Scenario {
 		handler: simulation.NewHandler(store),
 		engine:  engine,
 		future:  newProjectionDriver(store),
+		inbox:   newProjectionInboxDriver(store),
 	}
 	t.Cleanup(engine.Close)
 	s.World = WorldDSL{s: s}
@@ -67,14 +64,12 @@ func New(t *testing.T, runID string) *Scenario {
 	s.Server = ServerDSL{s: s}
 	s.User = UserDSL{s: s}
 	s.Visitor = VisitorDSL{s: s}
-	s.Bug = BugDSL{s: s}
-	s.Deployment = DeploymentDSL{s: s}
 	s.Time = TimeDSL{s: s}
 	s.State = StateDSL{s: s}
 	s.Events = EventsDSL{s: s}
 	s.Logs = LogsDSL{s: s}
-	s.Deployments = DeploymentsDSL{s: s}
 	s.Future = FutureDSL{s: s}
+	s.Inbox = InboxFutureDSL{s: s}
 	return s
 }
 
@@ -183,19 +178,6 @@ func (d WorldDSL) InfrastructureConfigured(serverProvisioningDuration time.Durat
 	}
 }
 
-func (d WorldDSL) EconomyConfigured(initialBalanceMinor int64, billingPeriod time.Duration) Step {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		return s.appendGiven(events.EconomyConfigured{
-			InitialBalanceMinor: initialBalanceMinor, StopRunOnNegativeBalance: true,
-			ServerBillingPeriod: billingPeriod, ConfiguredAt: state.Clock.CurrentTime,
-		})
-	}
-}
-
 func (d WorldDSL) Schedule(schedule events.EventSchedule) Step {
 	return func(s *Scenario) error {
 		state, err := s.state()
@@ -208,38 +190,30 @@ func (d WorldDSL) Schedule(schedule events.EventSchedule) Step {
 
 type ProductDSL struct{ s *Scenario }
 
-func (d ProductDSL) Added(id simulation.ProductID, name string, priceMinor int64, viewPPM, purchasePPM uint32) Step {
+func (d ProductDSL) Added(id simulation.ProductID, name string, priceMinor int64, viewPPM uint32) Step {
 	return func(s *Scenario) error {
 		state, err := s.state()
 		if err != nil {
 			return err
 		}
 		return s.appendGiven(events.ProductAdded{
-			ProductID:              id,
-			Name:                   name,
-			PriceMinor:             priceMinor,
-			ViewProbabilityPPM:     viewPPM,
-			PurchaseProbabilityPPM: purchasePPM,
-			AddedAt:                state.Clock.CurrentTime,
+			ProductID:          id,
+			Name:               name,
+			PriceMinor:         priceMinor,
+			ViewProbabilityPPM: viewPPM,
+			AddedAt:            state.Clock.CurrentTime,
 		})
 	}
 }
 
-func (d ProductDSL) Add(id simulation.ProductID, name string, priceMinor int64, viewPPM, purchasePPM uint32) Step {
+func (d ProductDSL) Add(id simulation.ProductID, name string, priceMinor int64, viewPPM uint32) Step {
 	return func(s *Scenario) error {
 		return s.execute(simulation.AddProduct{
-			ProductID:              id,
-			Name:                   name,
-			PriceMinor:             priceMinor,
-			ViewProbabilityPPM:     viewPPM,
-			PurchaseProbabilityPPM: purchasePPM,
+			ProductID:          id,
+			Name:               name,
+			PriceMinor:         priceMinor,
+			ViewProbabilityPPM: viewPPM,
 		})
-	}
-}
-
-func (d ProductDSL) Purchase(purchaseID simulation.PurchaseID, productID simulation.ProductID) Step {
-	return func(s *Scenario) error {
-		return s.execute(simulation.PurchaseProduct{PurchaseID: purchaseID, ProductID: productID})
 	}
 }
 
@@ -310,14 +284,6 @@ func (d ServerDSL) Remove(commandID model.CommandID, operationID model.Operation
 			CommandID:   commandID,
 			OperationID: operationID,
 			ServerID:    serverID,
-		})
-	}
-}
-
-func (d ServerDSL) SetDesired(commandID model.CommandID, operationID model.OperationID, desiredInstances int) Step {
-	return func(s *Scenario) error {
-		return s.execute(simulation.SetBackendDesiredInstances{
-			CommandID: commandID, OperationID: operationID, DesiredInstances: desiredInstances,
 		})
 	}
 }
@@ -400,133 +366,6 @@ func (d UserDSL) RecordedResponse(
 			StatusCode:  statusCode,
 			Latency:     latency,
 			CompletedAt: state.Clock.CurrentTime,
-		})
-	}
-}
-
-type BugDSL struct{ s *Scenario }
-
-func (d BugDSL) Activated(id model.BugID, page model.PageType, productID model.ProductID, failurePPM uint32, fixMessage string) Step {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		fixMessageHash := sha256.Sum256([]byte(fixMessage))
-		return s.appendGiven(events.PageBugActivated{
-			BugID:                 id,
-			Page:                  page,
-			ProductID:             productID,
-			FailureProbabilityPPM: failurePPM,
-			FixMessage:            fixMessage,
-			FixMessageHash:        hex.EncodeToString(fixMessageHash[:]),
-			ActivatedAt:           state.Clock.CurrentTime,
-		})
-	}
-}
-
-func (d BugDSL) Fix(commandID model.CommandID, message string) Step {
-	return func(s *Scenario) error {
-		return s.execute(simulation.ApplyFix{
-			CommandID: commandID,
-			Message:   message,
-		})
-	}
-}
-
-type DeploymentDSL struct{ s *Scenario }
-
-func (d DeploymentDSL) Defined(
-	id model.DeploymentID,
-	sequence int,
-	name string,
-	duration time.Duration,
-	failureProbabilityPPM uint32,
-) Step {
-	return d.DefinedWithCost(id, sequence, name, 0, duration, failureProbabilityPPM)
-}
-
-func (d DeploymentDSL) DefinedWithCost(
-	id model.DeploymentID,
-	sequence int,
-	name string,
-	costMinor int64,
-	duration time.Duration,
-	failureProbabilityPPM uint32,
-) Step {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		return s.appendGiven(events.DeploymentDefined{
-			DeploymentID:          id,
-			Sequence:              sequence,
-			Name:                  name,
-			Description:           name,
-			CostMinor:             costMinor,
-			Duration:              duration,
-			FailureProbabilityPPM: failureProbabilityPPM,
-			DefinedAt:             state.Clock.CurrentTime,
-		})
-	}
-}
-
-func (d DeploymentDSL) Unlocked(id model.DeploymentID) Step {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		return s.appendGiven(events.DeploymentUnlocked{
-			DeploymentID: id,
-			UnlockedAt:   state.Clock.CurrentTime,
-		})
-	}
-}
-
-func (d DeploymentDSL) PageLoadEffect(
-	id model.DeploymentID,
-	page model.PageType,
-	newLoadUnits int64,
-	newHoldDuration time.Duration,
-) Step {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		return s.appendGiven(events.DeploymentPageLoadEffectDefined{
-			DeploymentID:    id,
-			Page:            page,
-			NewLoadUnits:    newLoadUnits,
-			NewHoldDuration: newHoldDuration,
-			DefinedAt:       state.Clock.CurrentTime,
-		})
-	}
-}
-
-func (d DeploymentDSL) BugProbabilityEffect(id model.DeploymentID, bugID model.BugID, newProbabilityPPM uint32) Step {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		return s.appendGiven(events.DeploymentBugProbabilityEffectDefined{
-			DeploymentID:      id,
-			BugID:             bugID,
-			NewProbabilityPPM: newProbabilityPPM,
-			DefinedAt:         state.Clock.CurrentTime,
-		})
-	}
-}
-
-func (d DeploymentDSL) Start(commandID model.CommandID, deploymentID model.DeploymentID, operationID model.OperationID) Step {
-	return func(s *Scenario) error {
-		return s.execute(simulation.StartDeployment{
-			CommandID:    commandID,
-			DeploymentID: deploymentID,
-			OperationID:  operationID,
 		})
 	}
 }
@@ -614,19 +453,6 @@ func (d StateDSL) HasNoServer(id model.ServerID) Assertion {
 	}
 }
 
-func (d StateDSL) Economy(revenueMinor int64, successfulPurchases uint64) Assertion {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		if state.Economy.RevenueMinor != revenueMinor || state.Economy.SuccessfulPurchases != successfulPurchases {
-			return fmt.Errorf("economy = %#v, want revenue=%d purchases=%d", state.Economy, revenueMinor, successfulPurchases)
-		}
-		return nil
-	}
-}
-
 func (d StateDSL) CurrentTime(want time.Time) Assertion {
 	return func(s *Scenario) error {
 		state, err := s.state()
@@ -697,6 +523,35 @@ func (d EventsDSL) HasNoType(eventType string) Assertion {
 	}
 }
 
+func (d EventsDSL) TypesExactly(want ...string) Assertion {
+	return func(s *Scenario) error {
+		got := make([]string, 0, len(s.emitted))
+		for _, event := range s.emitted {
+			got = append(got, event.EventType())
+		}
+		if !reflect.DeepEqual(got, want) {
+			return fmt.Errorf("emitted event types = %#v, want %#v", got, want)
+		}
+		return nil
+	}
+}
+
+func (d EventsDSL) TypesContain(want ...string) Assertion {
+	return func(s *Scenario) error {
+		counts := make(map[string]int, len(s.emitted))
+		for _, event := range s.emitted {
+			counts[event.EventType()]++
+		}
+		for _, eventType := range want {
+			if counts[eventType] == 0 {
+				return fmt.Errorf("emitted event types do not contain %q: %#v", eventType, s.emitted)
+			}
+			counts[eventType]--
+		}
+		return nil
+	}
+}
+
 func (d EventsDSL) EqualTo(other *Scenario) Assertion {
 	return func(s *Scenario) error {
 		if !reflect.DeepEqual(s.emitted, other.emitted) {
@@ -712,36 +567,6 @@ func (d LogsDSL) Exactly(want ...logs.Entry) Assertion {
 	return func(s *Scenario) error {
 		if !reflect.DeepEqual(s.logs, want) {
 			return fmt.Errorf("site logs = %#v, want %#v", s.logs, want)
-		}
-		return nil
-	}
-}
-
-type DeploymentStatusExpectation struct {
-	ID       model.DeploymentID
-	Sequence int
-	Status   model.DeploymentLifecycleStatus
-}
-
-type DeploymentsDSL struct{ s *Scenario }
-
-func (d DeploymentsDSL) Statuses(want ...DeploymentStatusExpectation) Assertion {
-	return func(s *Scenario) error {
-		state, err := s.state()
-		if err != nil {
-			return err
-		}
-		got := make([]DeploymentStatusExpectation, 0, len(state.Deployments))
-		for _, deployment := range state.Deployments {
-			got = append(got, DeploymentStatusExpectation{
-				ID:       deployment.ID,
-				Sequence: deployment.Sequence,
-				Status:   deployment.Status,
-			})
-		}
-		sort.Slice(got, func(i, j int) bool { return got[i].Sequence < got[j].Sequence })
-		if !reflect.DeepEqual(got, want) {
-			return fmt.Errorf("deployments = %#v, want %#v", got, want)
 		}
 		return nil
 	}

@@ -119,7 +119,7 @@ func TestRunContinuesFromSQLiteEventStreamAfterRestart(t *testing.T) {
 	}
 	if _, err := handler.Execute(s.ctx, "run-persistent", simulation.AddProduct{
 		ProductID: "persisted-product", Name: "Persisted product", PriceMinor: 12_990,
-		ViewProbabilityPPM: 1_000_000, PurchaseProbabilityPPM: 1_000_000,
+		ViewProbabilityPPM: 1_000_000,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestRunsOfSameStoredWorldHaveIndependentStreams(t *testing.T) {
 	}
 	if _, err := handler.Execute(s.ctx, "run-one", simulation.AddProduct{
 		ProductID: "only-first", Name: "Only first", PriceMinor: 1000,
-		ViewProbabilityPPM: 100_000, PurchaseProbabilityPPM: 100_000,
+		ViewProbabilityPPM: 100_000,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -198,13 +198,8 @@ func generatedWorldDefinition() generator.WorldDefinition {
 	return generator.WorldDefinition{
 		WorldID:        "world-seed-42-v1",
 		Key:            generator.WorldKey{Seed: 42, ProfileHash: "profile-hash-v1", GeneratorVersion: "generator-v1"},
-		ProfileVersion: "world-generation.v1", ScheduleHash: "schedule-hash-v1", Source: "generated",
+		ProfileVersion: "world-generation.v2", ScheduleHash: "schedule-hash-v1", Source: "generated",
 		StartsAt: startsAt, EndsAt: startsAt.AddDate(1, 0, 0), CreatedAt: startsAt,
-		Evaluation: generator.WorldEvaluation{
-			EvaluatorVersion: generator.EvaluatorVersion, MaximumBalanceMinor: 42_000,
-			AgentRequestCount: 2, AgentRequestDuration: 10 * time.Second, MinimumRealTime: 20 * time.Second,
-			OptimalPlan: []generator.OracleAction{{Kind: "start", At: startsAt}, {Kind: "advance_time", At: startsAt}},
-		},
 		Events: events.EventSchedule{{Sequence: 1, OccursAt: arrivesAt, Event: events.VisitorArrived{VisitorID: "visitor-1", ArrivedAt: arrivesAt}}},
 	}
 }

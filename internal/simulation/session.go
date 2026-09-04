@@ -102,6 +102,10 @@ func (s *RunSession) RequestEvents(requestID model.RequestID) []events.Event {
 			if event.RequestID == requestID {
 				result = append(result, event)
 			}
+		case events.FirewallRequestEvaluated:
+			if event.RequestID == requestID {
+				result = append(result, event)
+			}
 		case events.PageRequestCompleted:
 			if event.RequestID == requestID {
 				result = append(result, event)

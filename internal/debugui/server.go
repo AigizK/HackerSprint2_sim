@@ -20,7 +20,6 @@ type queryService interface {
 	Runs(context.Context, string, int, int) ([]application.DebugRunSummary, error)
 	Overview(context.Context, string) (application.DebugRunOverview, error)
 	Logs(context.Context, string, simulation.LogsQuery) (simulation.RunRecord, simulation.LogsView, error)
-	Economy(context.Context, string) (simulation.RunRecord, simulation.EconomyView, error)
 }
 
 type Server struct {
@@ -29,7 +28,6 @@ type Server struct {
 	runs     *template.Template
 	overview *template.Template
 	logs     *template.Template
-	economy  *template.Template
 }
 
 func New(query queryService) *Server {
@@ -62,13 +60,11 @@ func New(query queryService) *Server {
 		runs:     template.Must(template.New("runs").Funcs(functions).Parse(commonTemplate + runsTemplate)),
 		overview: template.Must(template.New("overview").Funcs(functions).Parse(commonTemplate + overviewTemplate)),
 		logs:     template.Must(template.New("logs").Funcs(functions).Parse(commonTemplate + logsTemplate)),
-		economy:  template.Must(template.New("economy").Funcs(functions).Parse(commonTemplate + economyTemplate)),
 	}
 	server.mux.HandleFunc("GET /debug", server.redirectRoot)
 	server.mux.HandleFunc("GET /debug/", server.handleRuns)
 	server.mux.HandleFunc("GET /debug/runs/{run_id}/overview", server.handleOverview)
 	server.mux.HandleFunc("GET /debug/runs/{run_id}/logs", server.handleLogs)
-	server.mux.HandleFunc("GET /debug/runs/{run_id}/economy", server.handleEconomy)
 	return server
 }
 
@@ -154,22 +150,6 @@ func (s *Server) handleLogs(writer http.ResponseWriter, request *http.Request) {
 		nextQuery = values.Encode()
 	}
 	s.render(writer, s.logs, logsPage{RunID: runID, Run: run, View: view, Status: status, NextQuery: nextQuery})
-}
-
-type economyPage struct {
-	RunID string
-	Run   simulation.RunRecord
-	View  simulation.EconomyView
-}
-
-func (s *Server) handleEconomy(writer http.ResponseWriter, request *http.Request) {
-	runID := request.PathValue("run_id")
-	run, view, err := s.query.Economy(request.Context(), runID)
-	if err != nil {
-		s.writeError(writer, err)
-		return
-	}
-	s.render(writer, s.economy, economyPage{RunID: runID, Run: run, View: view})
 }
 
 func (s *Server) render(writer http.ResponseWriter, page *template.Template, data any) {

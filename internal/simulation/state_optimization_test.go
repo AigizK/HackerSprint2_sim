@@ -13,7 +13,7 @@ func TestPruneDerivedStateKeepsIDsAndDropsCompletedDetails(t *testing.T) {
 	state := NewState()
 	state.Requests["request-1"] = PageRequestState{ID: "request-1", Status: model.PageRequestSucceeded, CompletedAt: now}
 	state.SeenRequests["request-1"] = struct{}{}
-	state.Visitors["visitor-1"] = VisitorState{ID: "visitor-1", Outcome: model.VisitorPurchased, CompletedAt: now}
+	state.Visitors["visitor-1"] = VisitorState{ID: "visitor-1", Outcome: model.VisitorLeftAfterProductPage, CompletedAt: now}
 	state.SeenVisitors["visitor-1"] = struct{}{}
 	state.Capacity["request-1"] = CapacityAllocationState{RequestID: "request-1", ServerID: "server-1", LoadUnits: 60, ReleasesAt: now}
 	state.UsedCapacityByServer["server-1"] = 60

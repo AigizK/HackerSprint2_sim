@@ -30,6 +30,6 @@ func main() {
 		os.Exit(1)
 	}
 	state := session.State()
-	fmt.Printf("run_id=%s\nstatus=%s\nsimulation_time=%s\nversion=%d\npurchases=%d\n",
-		state.RunID, state.Status, state.Clock.CurrentTime.Format("2006-01-02T15:04:05Z07:00"), session.Version(), state.Economy.SuccessfulPurchases)
+	fmt.Printf("run_id=%s\nstatus=%s\nsimulation_time=%s\nversion=%d\nserver_cost_minor=%d\n",
+		state.RunID, state.Status, state.Clock.CurrentTime.Format("2006-01-02T15:04:05Z07:00"), session.Version(), state.Costs.ServerCostMinor)
 }

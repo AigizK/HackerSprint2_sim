@@ -16,24 +16,18 @@ type WorldCreated struct {
 func (WorldCreated) EventType() string { return "WorldCreated" }
 
 type ProductAdded struct {
-	ProductID              ProductID
-	Name                   string
-	PriceMinor             int64
-	ViewProbabilityPPM     uint32
-	PurchaseProbabilityPPM uint32
-	AddedAt                time.Time
+	ProductID          ProductID
+	Name               string
+	Description        string
+	Manufacturer       string
+	PriceMinor         int64
+	Available          bool
+	Version            uint64
+	ViewProbabilityPPM uint32
+	AddedAt            time.Time
 }
 
 func (ProductAdded) EventType() string { return "ProductAdded" }
-
-type ProductPurchased struct {
-	PurchaseID  PurchaseID
-	ProductID   ProductID
-	PriceMinor  int64
-	PurchasedAt time.Time
-}
-
-func (ProductPurchased) EventType() string { return "ProductPurchased" }
 
 type TimeAdvanced struct {
 	CommandID         CommandID

@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS worlds (
     starts_at TEXT NOT NULL,
     ends_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    evaluation_json BLOB NOT NULL,
     UNIQUE (seed, profile_hash, generator_version)
 );
 
