@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -26,10 +27,11 @@ type Server struct {
 	runs       *application.RunService
 	mux        *http.ServeMux
 	newAuditID func() (string, error)
+	logger     *log.Logger
 }
 
 func New(start *application.StartRunService, runs *application.RunService) *Server {
-	server := &Server{start: start, runs: runs, mux: http.NewServeMux(), newAuditID: application.NewRunID}
+	server := &Server{start: start, runs: runs, mux: http.NewServeMux(), newAuditID: application.NewRunID, logger: log.Default()}
 	server.routes()
 	return server
 }
@@ -133,6 +135,9 @@ func parseMetricNames(values []string) []string {
 
 func (s *Server) writeError(writer http.ResponseWriter, err error) {
 	apiError := application.ClassifyError(err)
+	if apiError.Status >= http.StatusInternalServerError {
+		s.logger.Printf("httpapi: status=%d code=%s error=%v", apiError.Status, apiError.Code, err)
+	}
 	writeJSON(writer, apiError.Status, errorResponse{Error: apiError.Code, Message: apiError.Message})
 }
 
