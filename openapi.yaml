@@ -81,8 +81,10 @@ info:
     необходимо дождаться через GET /operations/{operation_id}.
 
 servers:
+  - url: http://81.176.229.58:8080
+    description: Основной сервер симуляции
   - url: /
-    description: Тот же origin, с которого получен OpenAPI-документ
+    description: Тот же origin, с которого получен OpenAPI-документ (локальная разработка)
 
 security: []
 

@@ -39,6 +39,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /openapi.yaml", handleOpenAPI)
 	s.mux.HandleFunc("POST /v2/start", s.handleStartRun)
 	s.mux.HandleFunc("GET /v2/runs/{run_id}/overview", s.handleOverview)
 	s.mux.HandleFunc("GET /v2/runs/{run_id}/metrics", s.handleMetrics)

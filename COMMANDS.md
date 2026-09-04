@@ -11,7 +11,25 @@ credentials, асинхронные операции и их replay реализ
 
 ## Старт и доступ
 
-Вызовите `POST /v2/start` без авторизации:
+Основной URL API: `http://81.176.229.58:8080`. В примерах ниже он обозначен как
+`API_ORIGIN`:
+
+```bash
+API_ORIGIN=http://81.176.229.58:8080
+```
+
+Полный OpenAPI-контракт со всеми endpoint, схемами запросов, ответов и ошибок
+доступен без авторизации по адресу `$API_ORIGIN/openapi.yaml`.
+
+Создайте run вызовом `POST $API_ORIGIN/v2/start` без авторизации:
+
+```bash
+curl -X POST "$API_ORIGIN/v2/start" \
+  -H 'Content-Type: application/json' \
+  -d '{"seed":42,"agent_id":"sre-agent","agent_version":"1.0","request_id":"start-001"}'
+```
+
+Тело запроса:
 
 ```json
 {"seed":42,"agent_id":"sre-agent","agent_version":"1.0","request_id":"start-001"}
@@ -51,7 +69,6 @@ credentials, асинхронные операции и их replay реализ
 а не как полноценная защита учётной записи.
 
 Наблюдение, inbox, probes, операции и продвижение времени не требуют Basic Auth.
-Все пути начинаются с `/v2`; старые `/v1` не поддерживаются.
 
 ## Формат команды и два уровня авторизации
 

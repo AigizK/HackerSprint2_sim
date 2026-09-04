@@ -15,6 +15,13 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/model"
 )
 
+func handleOpenAPI(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	writer.Header().Set("Cache-Control", "no-cache")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write([]byte(agentdocs.OpenAPIYAML()))
+}
+
 func (s *Server) handleStartRun(writer http.ResponseWriter, request *http.Request) {
 	var input startRunRequest
 	body, err := decodeRequestBody(writer, request, &input)
