@@ -34,8 +34,6 @@ type AdvanceTime struct {
 	RequestedDuration time.Duration
 	StopOnLogError    bool
 	LogErrorCodes     []model.RequestFailureCode
-	stopAt            time.Time
-	previewLogErrors  bool
 }
 
 func (AdvanceTime) commandType() string { return "AdvanceTime" }
@@ -49,6 +47,11 @@ type OpenPage struct {
 	SourceIP   string
 	UserAgent  string
 	RegionCode model.RegionCode
+	// skipBackendAvailabilityClone is used by the bulk time-advance path,
+	// which already owns a mutable working state. Standalone page commands
+	// keep the pure decision behavior and clone once before deriving the
+	// availability transition.
+	skipBackendAvailabilityClone bool
 }
 
 func (OpenPage) commandType() string { return "OpenPage" }

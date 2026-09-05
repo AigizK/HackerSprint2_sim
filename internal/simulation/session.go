@@ -36,7 +36,7 @@ func OpenRunSession(ctx context.Context, store EventStore, runID string) (*RunSe
 func (s *RunSession) Execute(ctx context.Context, command Command) ([]events.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	decided, err := DecideWithRunPolicies(s.runID, s.state, command)
+	decided, err := DecideWithRunPoliciesContext(ctx, s.runID, s.state, command)
 	if err != nil {
 		return nil, err
 	}

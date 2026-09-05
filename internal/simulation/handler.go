@@ -35,7 +35,11 @@ func (h *Handler) Execute(ctx context.Context, runID string, command Command) ([
 
 // DecideWithRunPolicies executes the current aggregate rules.
 func DecideWithRunPolicies(runID string, state State, command Command) ([]events.Event, error) {
-	decided, err := Decide(runID, state, command)
+	return DecideWithRunPoliciesContext(context.Background(), runID, state, command)
+}
+
+func DecideWithRunPoliciesContext(ctx context.Context, runID string, state State, command Command) ([]events.Event, error) {
+	decided, err := decideContext(ctx, runID, state, command)
 	if err != nil {
 		return nil, err
 	}

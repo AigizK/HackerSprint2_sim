@@ -1,6 +1,7 @@
 package simulation
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -28,6 +29,13 @@ func Rehydrate(records []StoredEvent) (State, error) {
 }
 
 func Decide(runID string, state State, command Command) ([]events.Event, error) {
+	return decideContext(context.Background(), runID, state, command)
+}
+
+func decideContext(ctx context.Context, runID string, state State, command Command) ([]events.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if commandID, payload := commandReceipt(command); commandID != "" {
 		if previous, exists := state.CommandPayloads[commandID]; exists {
 			if previous != payload {
@@ -85,7 +93,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			return nil, err
 		}
 		normalizedCodes, validCodes := normalizeLogErrorCodes(command.LogErrorCodes)
-		if !validCodes || (len(command.LogErrorCodes) > 0 && !command.StopOnLogError && !command.previewLogErrors) {
+		if !validCodes || (len(command.LogErrorCodes) > 0 && !command.StopOnLogError) {
 			return nil, fmt.Errorf("%w: invalid log error filter", ErrInvalidCommand)
 		}
 		command.LogErrorCodes = normalizedCodes
@@ -103,27 +111,8 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			applied = remaining
 		}
 		to := state.Clock.CurrentTime.Add(applied)
-		if command.StopOnLogError && command.stopAt.IsZero() {
-			previewCommand := command
-			previewCommand.CommandID = ""
-			previewCommand.StopOnLogError = false
-			previewCommand.previewLogErrors = true
-			preview, err := Decide(runID, state, previewCommand)
-			if err != nil {
-				return nil, err
-			}
-			if stopAt, found := firstLogErrorTime(preview, command.LogErrorCodes); found {
-				command.stopAt = stopAt
-			}
-		}
-		if !command.stopAt.IsZero() {
-			if !command.stopAt.After(state.Clock.CurrentTime) || command.stopAt.After(to) {
-				return nil, fmt.Errorf("%w: log-error stop time is outside the advance interval", ErrInvalidCommand)
-			}
-			to = command.stopAt
-			applied = to.Sub(state.Clock.CurrentTime)
-		}
-		working := cloneState(state)
+		pending := pendingScheduledEvents(state, to)
+		working := cloneStateForAdvance(state, pending)
 		result := make([]events.Event, 0)
 		appendEvents := func(items ...events.Event) error {
 			for _, event := range items {
@@ -206,6 +195,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			}
 			return nil
 		}
+		var completedSiteStopOperationID model.OperationID
 		releaseConnections := func(until time.Time) error {
 			expiredConnections := make([]DatabaseConnectionState, 0)
 			for _, connection := range working.DatabaseConnections {
@@ -243,24 +233,22 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 					stoppedAt = lastReleasedAt
 				}
 				operationID := working.Site.OperationID
-				if err := appendEvents(events.SiteStopped{OperationID: operationID, StoppedAt: stoppedAt},
-					events.OperationSucceeded{OperationID: operationID, CompletedAt: to}); err != nil {
+				if err := appendEvents(events.SiteStopped{OperationID: operationID, StoppedAt: stoppedAt}); err != nil {
 					return err
 				}
+				completedSiteStopOperationID = operationID
 			}
 			return nil
 		}
-		if err := appendEvents(infrastructureCostEvents(working, state.Clock.CurrentTime, to)...); err != nil {
-			return nil, err
-		}
-		if err := appendEvents(backupStorageCostEvents(working, state.Clock.CurrentTime, to)...); err != nil {
-			return nil, err
-		}
 		// Events inside the interval use the existing infrastructure. Server
 		// lifecycle transitions becoming ready are committed at its end.
-		pending := pendingScheduledEvents(state, to)
 		logErrorSeen := false
 		for index, scheduled := range pending {
+			if index%64 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
 			if err := processAvailabilityBoundaries(scheduled.OccursAt); err != nil {
 				return nil, err
 			}
@@ -289,7 +277,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 				}
 			}
 			if arrival, ok := scheduled.Event.(events.VisitorArrived); ok && len(working.Products) > 0 {
-				journey, err := decideVisitorMutable(&working, arrival.VisitorID, arrival.ArrivedAt, false)
+				journey, err := decideVisitorMutableContext(ctx, &working, arrival.VisitorID, arrival.ArrivedAt, false)
 				if err != nil {
 					return nil, err
 				}
@@ -302,15 +290,30 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 				return nil, err
 			}
 			nextHasSameTime := index+1 < len(pending) && pending[index+1].OccursAt.Equal(scheduled.OccursAt)
-			if command.previewLogErrors && logErrorSeen && !nextHasSameTime {
-				return result, nil
+			if command.StopOnLogError && logErrorSeen && !nextHasSameTime {
+				to = scheduled.OccursAt
+				applied = to.Sub(state.Clock.CurrentTime)
+				break
 			}
+		}
+		// The first TimeAdvanced event is applied provisionally with the requested
+		// upper bound so scheduled facts validate while they are decided. Once a
+		// matching error fixes an earlier boundary, the working clock and event are
+		// narrowed before terminal transitions are produced.
+		working.Clock.CurrentTime = to
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		if err := processAvailabilityBoundaries(to); err != nil {
 			return nil, err
 		}
 		if err := releaseConnections(to); err != nil {
 			return nil, err
+		}
+		if completedSiteStopOperationID != "" {
+			if err := appendEvents(events.OperationSucceeded{OperationID: completedSiteStopOperationID, CompletedAt: to}); err != nil {
+				return nil, err
+			}
 		}
 		completedOperations := make(map[model.OperationID]bool)
 		for _, server := range sortedProvisioningServers(working) {
@@ -374,10 +377,23 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 				return nil, err
 			}
 		}
+		advanced := result[0].(events.TimeAdvanced)
+		advanced.To = to
+		advanced.AppliedDuration = applied
+		result[0] = advanced
+		costEvents := infrastructureCostEvents(state, state.Clock.CurrentTime, to)
+		costEvents = append(costEvents, backupStorageCostEvents(state, state.Clock.CurrentTime, to)...)
+		if len(costEvents) > 0 {
+			ordered := make([]events.Event, 0, len(result)+len(costEvents))
+			ordered = append(ordered, result[0])
+			ordered = append(ordered, costEvents...)
+			ordered = append(ordered, result[1:]...)
+			result = ordered
+		}
 		return result, nil
 
 	case SynchronizeRealTime:
-		return Decide(runID, state, AdvanceTime{CommandID: command.CommandID, RealElapsed: command.RealElapsed})
+		return decideContext(ctx, runID, state, AdvanceTime{CommandID: command.CommandID, RealElapsed: command.RealElapsed})
 
 	case OpenPage:
 		if err := ensureRunning(state); err != nil {
@@ -478,6 +494,9 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 			RequestID: command.RequestID, ServerID: serverID, DatabaseID: databaseID, FirewallRuleID: decision.RuleID,
 			StatusCode: 200, Latency: pageConfig.BaseLatency, CompletedAt: state.Clock.CurrentTime,
 		})
+		if command.skipBackendAvailabilityClone {
+			return result, nil
+		}
 		return appendBackendAvailabilityChange(state, result, state.Clock.CurrentTime)
 
 	case AddServer:
@@ -596,7 +615,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		return appendBackendAvailabilityChange(state, result, state.Clock.CurrentTime)
 
 	case ProbePage:
-		generated, err := Decide(runID, state, OpenPage{
+		generated, err := decideContext(ctx, runID, state, OpenPage{
 			RequestID: command.RequestID, VisitorID: "__probe__", Page: command.Page, ProductID: command.ProductID,
 		})
 		if err != nil {
@@ -616,7 +635,7 @@ func Decide(runID string, state State, command Command) ([]events.Event, error) 
 		return result, nil
 
 	case SimulateVisitor:
-		return decideVisitor(state, command.VisitorID, state.Clock.CurrentTime, true)
+		return decideVisitorContext(ctx, state, command.VisitorID, state.Clock.CurrentTime, true)
 
 	case ConfigureServerCatalog:
 		return decideConfigureServerCatalog(state, command)
@@ -825,11 +844,22 @@ func deterministicRoll(seed int64, parts ...string) uint32 {
 }
 
 func decideVisitor(state State, visitorID model.VisitorID, at time.Time, includeArrival bool) ([]events.Event, error) {
+	return decideVisitorContext(context.Background(), state, visitorID, at, includeArrival)
+}
+
+func decideVisitorContext(ctx context.Context, state State, visitorID model.VisitorID, at time.Time, includeArrival bool) ([]events.Event, error) {
 	working := cloneState(state)
-	return decideVisitorMutable(&working, visitorID, at, includeArrival)
+	return decideVisitorMutableContext(ctx, &working, visitorID, at, includeArrival)
 }
 
 func decideVisitorMutable(working *State, visitorID model.VisitorID, at time.Time, includeArrival bool) ([]events.Event, error) {
+	return decideVisitorMutableContext(context.Background(), working, visitorID, at, includeArrival)
+}
+
+func decideVisitorMutableContext(ctx context.Context, working *State, visitorID model.VisitorID, at time.Time, includeArrival bool) ([]events.Event, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := ensureRunning(*working); err != nil {
 		return nil, err
 	}
@@ -854,16 +884,25 @@ func decideVisitorMutable(working *State, visitorID model.VisitorID, at time.Tim
 			return nil, err
 		}
 	}
-	listEvents, err := Decide("", *working, OpenPage{
+	listEvents, err := decideContext(ctx, "", *working, OpenPage{
 		RequestID: model.RequestID(string(visitorID) + ":product_list"), VisitorID: visitorID, Page: model.PageProductList,
+		skipBackendAvailabilityClone: true,
 	})
 	if err != nil {
 		return nil, err
 	}
+	listFailed := requestFailed(listEvents)
 	if err := appendEvents(listEvents...); err != nil {
 		return nil, err
 	}
-	if requestFailed(listEvents) {
+	if !listFailed {
+		availability, err := appendBackendAvailabilityChangeToWorking(nil, working, at)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, availability...)
+	}
+	if listFailed {
 		failure := []events.Event{events.VisitorJourneyCompleted{VisitorID: visitorID, Outcome: model.VisitorLeftAfterPageError, CompletedAt: at}}
 		if err := appendEvents(failure...); err != nil {
 			return nil, err
@@ -895,14 +934,23 @@ func decideVisitorMutable(working *State, visitorID model.VisitorID, at time.Tim
 		return nil, err
 	}
 	productRequestID := model.RequestID(string(visitorID) + ":product_page")
-	productEvents, err := Decide("", *working, OpenPage{RequestID: productRequestID, VisitorID: visitorID, Page: model.PageProduct, ProductID: selected.ID})
+	productEvents, err := decideContext(ctx, "", *working, OpenPage{RequestID: productRequestID, VisitorID: visitorID, Page: model.PageProduct, ProductID: selected.ID,
+		skipBackendAvailabilityClone: true})
 	if err != nil {
 		return nil, err
 	}
+	productFailed := requestFailed(productEvents)
 	if err := appendEvents(productEvents...); err != nil {
 		return nil, err
 	}
-	if requestFailed(productEvents) {
+	if !productFailed {
+		availability, err := appendBackendAvailabilityChangeToWorking(nil, working, at)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, availability...)
+	}
+	if productFailed {
 		failure := []events.Event{events.VisitorJourneyCompleted{VisitorID: visitorID, Outcome: model.VisitorLeftAfterPageError, CompletedAt: at}}
 		if err := appendEvents(failure...); err != nil {
 			return nil, err
@@ -914,6 +962,23 @@ func decideVisitorMutable(working *State, visitorID model.VisitorID, at time.Tim
 }
 
 func cloneState(state State) State {
+	return cloneStateWithSeenSets(state, true)
+}
+
+// Seen request and visitor IDs are append-only idempotency indexes. An advance
+// without a scheduled visitor cannot add to either set, so sharing them keeps
+// small real-time advances independent of the accumulated run history.
+func cloneStateForAdvance(state State, pending events.EventSchedule) State {
+	for _, scheduled := range pending {
+		switch scheduled.Event.(type) {
+		case events.VisitorArrived, events.PageRequestStarted:
+			return cloneStateWithSeenSets(state, true)
+		}
+	}
+	return cloneStateWithSeenSets(state, false)
+}
+
+func cloneStateWithSeenSets(state State, copySeenSets bool) State {
 	clone := state
 	clone.Products = cloneMap(state.Products)
 	clone.InboxMessages = cloneMap(state.InboxMessages)
@@ -935,9 +1000,11 @@ func cloneState(state State) State {
 	clone.ServerCredentials = cloneMap(state.ServerCredentials)
 	clone.CredentialRotationIDs = cloneMap(state.CredentialRotationIDs)
 	clone.Requests = cloneMap(state.Requests)
-	clone.SeenRequests = cloneMap(state.SeenRequests)
 	clone.Visitors = cloneMap(state.Visitors)
-	clone.SeenVisitors = cloneMap(state.SeenVisitors)
+	if copySeenSets {
+		clone.SeenRequests = cloneMap(state.SeenRequests)
+		clone.SeenVisitors = cloneMap(state.SeenVisitors)
+	}
 	clone.ActiveAttacks = cloneMap(state.ActiveAttacks)
 	clone.ResolvedAttacks = cloneMap(state.ResolvedAttacks)
 	clone.FirewallRules = cloneMap(state.FirewallRules)
