@@ -5,9 +5,7 @@ package journal
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,11 +39,24 @@ func WithSegmentSize(size int64) Option {
 	}
 }
 
+func WithMaxCachedRuns(maxRuns int) Option {
+	return func(store *Store) error {
+		if maxRuns < 1 {
+			return fmt.Errorf("journal cache size must be positive")
+		}
+		store.maxRuns = maxRuns
+		return nil
+	}
+}
+
 type Store struct {
 	root        string
 	segmentSize int64
+	maxRuns     int
 	mu          sync.Mutex
+	access      uint64
 	runs        map[string]*runStream
+	summaries   simulation.RunSummaryRepository
 }
 
 type runStream struct {
@@ -62,10 +73,15 @@ type runStream struct {
 	pendingEvents       []simulation.StoredEvent
 	pendingFirstVersion uint64
 	pendingEventCount   uint64
+	users               int
+	lastAccess          uint64
+	summary             *simulation.RunSummaryProjection
+	realStartedAt       time.Time
+	realCompletedAt     time.Time
 }
 
 func Open(root string, options ...Option) (*Store, error) {
-	store := &Store{root: root, segmentSize: DefaultSegmentSize, runs: make(map[string]*runStream)}
+	store := &Store{root: root, segmentSize: DefaultSegmentSize, maxRuns: 8, runs: make(map[string]*runStream)}
 	for _, option := range options {
 		if err := option(store); err != nil {
 			return nil, err
@@ -78,10 +94,11 @@ func Open(root string, options ...Option) (*Store, error) {
 }
 
 func (s *Store) Load(ctx context.Context, runID string) ([]simulation.StoredEvent, error) {
-	stream, err := s.stream(runID)
+	stream, err := s.acquireStream(runID)
 	if err != nil {
 		return nil, err
 	}
+	defer s.releaseStream(runID, stream)
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
 	if err := s.initialize(ctx, runID, stream); err != nil {
@@ -91,10 +108,11 @@ func (s *Store) Load(ctx context.Context, runID string) ([]simulation.StoredEven
 }
 
 func (s *Store) Append(ctx context.Context, runID string, expectedVersion uint64, newEvents []events.Event) ([]simulation.StoredEvent, error) {
-	stream, err := s.stream(runID)
+	stream, err := s.acquireStream(runID)
 	if err != nil {
 		return nil, err
 	}
+	defer s.releaseStream(runID, stream)
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
 	if err := s.initialize(ctx, runID, stream); err != nil {
@@ -113,6 +131,7 @@ func (s *Store) Append(ctx context.Context, runID string, expectedVersion uint64
 		if err != nil {
 			return nil, err
 		}
+		recordedAt = time.Now().UTC()
 		if err := s.appendFrame(ctx, stream, kindDomainEvents, recordedAt, payload); err != nil {
 			return nil, err
 		}
@@ -136,6 +155,7 @@ func (s *Store) Append(ctx context.Context, runID string, expectedVersion uint64
 				return nil, err
 			}
 		}
+		recordedAt = time.Now().UTC()
 		if err := s.appendFrame(ctx, stream, kindDomainCommit, recordedAt, nil); err != nil {
 			return nil, err
 		}
@@ -145,8 +165,10 @@ func (s *Store) Append(ctx context.Context, runID string, expectedVersion uint64
 		stream.domainVersion++
 		record := simulation.StoredEvent{Version: stream.domainVersion, Event: event}
 		stream.events = append(stream.events, record)
+		stream.applySummaryEvent(record, recordedAt)
 		appended = append(appended, record)
 	}
+	s.persistSummary(ctx, runID, stream)
 	return appended, nil
 }
 
@@ -154,10 +176,11 @@ func (s *Store) RecordAgentRequest(ctx context.Context, runID string, request Ag
 	if request.RequestID == "" || request.Method == "" || request.Path == "" || request.ReceivedAt.IsZero() {
 		return fmt.Errorf("invalid received agent request")
 	}
-	stream, err := s.stream(runID)
+	stream, err := s.acquireStream(runID)
 	if err != nil {
 		return err
 	}
+	defer s.releaseStream(runID, stream)
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
 	if err := s.initialize(ctx, runID, stream); err != nil {
@@ -175,6 +198,8 @@ func (s *Store) RecordAgentRequest(ctx context.Context, runID string, request Ag
 	}
 	stream.requestIndexes[request.RequestID] = len(stream.requests)
 	stream.requests = append(stream.requests, AgentRequestAudit{Received: request})
+	stream.applySummaryRequest(request)
+	s.persistSummary(ctx, runID, stream)
 	return nil
 }
 
@@ -182,10 +207,11 @@ func (s *Store) CompleteAgentRequest(ctx context.Context, runID string, completi
 	if completion.RequestID == "" || completion.CompletedAt.IsZero() {
 		return fmt.Errorf("invalid completed agent request")
 	}
-	stream, err := s.stream(runID)
+	stream, err := s.acquireStream(runID)
 	if err != nil {
 		return err
 	}
+	defer s.releaseStream(runID, stream)
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
 	if err := s.initialize(ctx, runID, stream); err != nil {
@@ -207,14 +233,16 @@ func (s *Store) CompleteAgentRequest(ctx context.Context, runID string, completi
 	}
 	copy := completion
 	stream.requests[index].Completed = &copy
+	s.persistSummary(ctx, runID, stream)
 	return nil
 }
 
 func (s *Store) LoadAgentRequests(ctx context.Context, runID string) ([]AgentRequestAudit, error) {
-	stream, err := s.stream(runID)
+	stream, err := s.acquireStream(runID)
 	if err != nil {
 		return nil, err
 	}
+	defer s.releaseStream(runID, stream)
 	stream.mu.Lock()
 	defer stream.mu.Unlock()
 	if err := s.initialize(ctx, runID, stream); err != nil {
@@ -225,13 +253,11 @@ func (s *Store) LoadAgentRequests(ctx context.Context, runID string) ([]AgentReq
 	return result, nil
 }
 
-func (s *Store) stream(runID string) (*runStream, error) {
+func (s *Store) acquireStream(runID string) (*runStream, error) {
 	if runID == "" {
 		return nil, fmt.Errorf("run id is required")
 	}
-	digest := sha256.Sum256([]byte(runID))
-	hexDigest := hex.EncodeToString(digest[:])
-	directory := filepath.Join(s.root, "runs", hexDigest[:2], hexDigest, "journal")
+	directory := s.runDirectory(runID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stream := s.runs[runID]
@@ -239,13 +265,47 @@ func (s *Store) stream(runID string) (*runStream, error) {
 		stream = &runStream{directory: directory, activeSegment: 1, requestIndexes: make(map[string]int)}
 		s.runs[runID] = stream
 	}
+	s.access++
+	stream.lastAccess = s.access
+	stream.users++
 	return stream, nil
+}
+
+func (s *Store) releaseStream(runID string, stream *runStream) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runs[runID] == stream && stream.users > 0 {
+		stream.users--
+	}
+	for len(s.runs) > s.maxRuns {
+		var candidateID string
+		oldest := ^uint64(0)
+		for id, candidate := range s.runs {
+			if candidate.users == 0 && candidate.lastAccess < oldest {
+				candidateID = id
+				oldest = candidate.lastAccess
+			}
+		}
+		if candidateID == "" {
+			return
+		}
+		delete(s.runs, candidateID)
+	}
 }
 
 func (s *Store) initialize(ctx context.Context, runID string, stream *runStream) error {
 	if stream.initialized {
 		return nil
 	}
+	// A canceled/failed first read may have consumed only part of the journal.
+	// Retry from a clean projection; never apply the same prefix twice.
+	stream.nextSequence, stream.domainVersion = 0, 0
+	stream.activeSegment, stream.activeSize = 1, 0
+	stream.events, stream.requests, stream.pendingEvents = nil, nil, nil
+	stream.pendingFirstVersion, stream.pendingEventCount = 0, 0
+	stream.requestIndexes = make(map[string]int)
+	stream.summary = simulation.NewRunSummaryProjection()
+	stream.realStartedAt, stream.realCompletedAt = time.Time{}, time.Time{}
 	if err := os.MkdirAll(stream.directory, 0o750); err != nil {
 		return err
 	}
@@ -402,6 +462,9 @@ func applyFrame(value frame, stream *runStream) error {
 			return fmt.Errorf("domain version discontinuity")
 		}
 		stream.events = append(stream.events, records...)
+		for _, record := range records {
+			stream.applySummaryEvent(record, value.recordedAt)
+		}
 		if len(records) > 0 {
 			stream.domainVersion = records[len(records)-1].Version
 		}
@@ -433,6 +496,9 @@ func applyFrame(value frame, stream *runStream) error {
 			return fmt.Errorf("incomplete domain transaction")
 		}
 		stream.events = append(stream.events, stream.pendingEvents...)
+		for _, record := range stream.pendingEvents {
+			stream.applySummaryEvent(record, value.recordedAt)
+		}
 		stream.domainVersion = stream.pendingEvents[len(stream.pendingEvents)-1].Version
 		stream.pendingEvents = nil
 		stream.pendingFirstVersion = 0
@@ -447,6 +513,7 @@ func applyFrame(value frame, stream *runStream) error {
 		}
 		stream.requestIndexes[request.RequestID] = len(stream.requests)
 		stream.requests = append(stream.requests, AgentRequestAudit{Received: request})
+		stream.applySummaryRequest(request)
 	case kindRequestCompleted:
 		var completion AgentRequestCompleted
 		if err := json.Unmarshal(value.payload, &completion); err != nil {

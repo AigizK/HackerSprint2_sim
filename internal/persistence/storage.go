@@ -27,7 +27,8 @@ func Open(root string, journalOptions ...journal.Option) (*Storage, error) {
 	if err != nil {
 		return nil, err
 	}
-	runJournal, err := journal.Open(root, journalOptions...)
+	options := append([]journal.Option{journal.WithRunSummaries(catalog)}, journalOptions...)
+	runJournal, err := journal.Open(root, options...)
 	if err != nil {
 		catalog.Close()
 		return nil, fmt.Errorf("open run journal: %w", err)

@@ -25,6 +25,8 @@
   let runQueue = Promise.resolve();
   let operationTimer = 0;
   let runtime = freshRuntime();
+  const historyFilters = { uptimeFrom: "", uptimeTo: "", agents: "", statuses: null, sortKey: "", sortDirection: "asc" };
+  const agentCollator = new Intl.Collator("ru", { numeric: true, sensitivity: "base" });
 
   function freshRuntime() {
     return {
@@ -174,8 +176,14 @@
     return dialog.returnValue === "confirm";
   }
 
-  async function historyRows() {
-    return api("/ui/api/runs?limit=100");
+  async function historyRows(all = false) {
+    const result = await api("/ui/api/runs?limit=100");
+    while (all && result.next_offset != null) {
+      const page = await api(`/ui/api/runs?limit=100&offset=${result.next_offset}`);
+      result.runs.push(...page.runs);
+      result.next_offset = page.next_offset;
+    }
+    return result;
   }
 
   async function renderStartPage() {
@@ -265,17 +273,115 @@
   async function renderHistoryPage() {
     loading("Читаем историю runs…");
     try {
-      const history = await historyRows();
-      const completed = history.runs.filter((run) => run.status === "completed").length;
+      const history = await historyRows(true);
+      const statuses = [...new Set(history.runs.map((run) => run.status || "unknown"))].sort();
       app.innerHTML = `<div class="section-heading">
-        <div><div class="eyebrow">Run archive</div><h1>История запусков</h1><p>${history.runs.length} runs · ${completed} завершено</p></div>
+        <div><div class="eyebrow">Run archive</div><h1>История запусков</h1><p id="history-count" aria-live="polite"></p></div>
         <a href="/ui/" class="button" data-link>Новый run</a>
-      </div>${historyTable(history.runs, true)}`;
+      </div>
+      <form id="history-filters" class="panel history-filters" aria-label="Фильтры истории" novalidate>
+        <fieldset><legend>Uptime, %</legend><div class="history-uptime-range">
+          <label for="history-uptime-from">От</label><input id="history-uptime-from" type="number" min="0" max="100" step="any" inputmode="decimal" placeholder="0" value="${escapeHTML(historyFilters.uptimeFrom)}" aria-describedby="history-filter-error">
+          <label for="history-uptime-to">До</label><input id="history-uptime-to" type="number" min="0" max="100" step="any" inputmode="decimal" placeholder="100" value="${escapeHTML(historyFilters.uptimeTo)}" aria-describedby="history-filter-error">
+        </div></fieldset>
+        <label class="field history-agent-filter" for="history-agents"><span>Агент <small>через запятую — ИЛИ</small></span>
+          <input id="history-agents" type="text" placeholder="af-sgr, uptick-vadim" value="${escapeHTML(historyFilters.agents)}" title="Имя или часть имени агента, без учёта регистра. Через запятую — ИЛИ." autocomplete="off" spellcheck="false">
+        </label>
+        <fieldset class="history-statuses"><legend>Состояние</legend><div class="history-status-options">
+          ${statuses.map((status) => `<label><input type="checkbox" name="status" value="${escapeHTML(status)}" ${historyFilters.statuses == null || historyFilters.statuses.has(status) ? "checked" : ""}><span class="badge ${statusClass(status)}">${escapeHTML(status)}</span></label>`).join("") || `<span class="muted">Нет состояний</span>`}
+        </div></fieldset>
+        <button class="button secondary compact history-reset" type="button" id="history-reset">Сбросить</button>
+        <p id="history-filter-error" class="history-filter-error" role="status" hidden></p>
+      </form><div id="history-results"></div>`;
+
+      const form = document.querySelector("#history-filters");
+      const fromInput = document.querySelector("#history-uptime-from");
+      const toInput = document.querySelector("#history-uptime-to");
+      const agentsInput = document.querySelector("#history-agents");
+      const results = document.querySelector("#history-results");
+      const update = () => {
+        historyFilters.uptimeFrom = fromInput.value;
+        historyFilters.uptimeTo = toInput.value;
+        historyFilters.agents = agentsInput.value;
+        const agents = agentsInput.value.split(",").map((name) => name.trim().toLowerCase()).filter(Boolean);
+        const from = fromInput.value === "" ? null : Number(fromInput.value) / 100;
+        const to = toInput.value === "" ? null : Number(toInput.value) / 100;
+        const error = !fromInput.validity.valid || !toInput.validity.valid
+          ? "Введите Uptime от 0 до 100%."
+          : from != null && to != null && from > to ? "Uptime «от» не должен быть больше «до»." : "";
+        const errorBox = document.querySelector("#history-filter-error");
+        errorBox.textContent = error;
+        errorBox.hidden = !error;
+        fromInput.setAttribute("aria-invalid", String(Boolean(error)));
+        toInput.setAttribute("aria-invalid", String(Boolean(error)));
+        const visible = error ? [] : history.runs.filter((run) => {
+          if (agents.length && !agents.some((name) => (run.agent_id || "").toLowerCase().includes(name))) return false;
+          if (historyFilters.statuses != null && !historyFilters.statuses.has(run.status || "unknown")) return false;
+          if (from == null && to == null) return true;
+          return Number.isFinite(run.uptime_ratio) && (from == null || run.uptime_ratio >= from) && (to == null || run.uptime_ratio <= to);
+        });
+        if (historyFilters.sortKey) visible.sort(compareHistoryRuns);
+        const completed = visible.filter((run) => run.status === "completed").length;
+        document.querySelector("#history-count").textContent = `Показано ${visible.length} из ${history.runs.length} runs · ${completed} завершено`;
+        const scrollLeft = results.querySelector(".table-scroll")?.scrollLeft || 0;
+        const focusedSort = results.contains(document.activeElement) ? document.activeElement.dataset.historySort : null;
+        results.innerHTML = historyTable(visible, true, error ? "Исправьте диапазон Uptime, чтобы увидеть запуски." : history.runs.length ? "По выбранным фильтрам запусков нет." : "Запусков пока нет.");
+        results.querySelector(".table-scroll").scrollLeft = scrollLeft;
+        if (focusedSort) results.querySelector(`[data-history-sort="${focusedSort}"]`)?.focus({ preventScroll: true });
+      };
+      form.addEventListener("submit", (event) => event.preventDefault());
+      fromInput.addEventListener("input", update);
+      toInput.addEventListener("input", update);
+      agentsInput.addEventListener("input", update);
+      form.addEventListener("change", (event) => {
+        if (!event.target.matches('input[name="status"]')) return;
+        historyFilters.statuses = new Set([...form.querySelectorAll('input[name="status"]:checked')].map((input) => input.value));
+        update();
+      });
+      document.querySelector("#history-reset").addEventListener("click", () => {
+        fromInput.value = toInput.value = agentsInput.value = "";
+        form.querySelectorAll('input[name="status"]').forEach((input) => { input.checked = true; });
+        historyFilters.statuses = null;
+        historyFilters.sortKey = "";
+        historyFilters.sortDirection = "asc";
+        update();
+      });
+      results.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-history-sort]");
+        if (!button) return;
+        const key = button.dataset.historySort;
+        historyFilters.sortDirection = historyFilters.sortKey === key && historyFilters.sortDirection === "asc" ? "desc" : "asc";
+        historyFilters.sortKey = key;
+        update();
+      });
+      update();
     } catch (error) { renderError(error); }
   }
 
-  function historyTable(runs, full = false) {
-    if (!runs.length) return `<div class="panel table-empty">Запусков пока нет. Создайте первый мир выше.</div>`;
+  function compareHistoryRuns(a, b) {
+    const key = historyFilters.sortKey;
+    const value = (run) => {
+      if (key === "agent_id") return run.agent_id || null;
+      if (key === "real_duration_seconds" && run.status !== "completed") return null;
+      return Number.isFinite(run[key]) ? run[key] : null;
+    };
+    const left = value(a), right = value(b);
+    if (left == null) return right == null ? 0 : 1;
+    if (right == null) return -1;
+    const compared = key === "agent_id" ? agentCollator.compare(left, right) || agentCollator.compare(a.agent_version || "", b.agent_version || "") : left - right;
+    return historyFilters.sortDirection === "asc" ? compared : -compared;
+  }
+
+  function historyColumn(label, key, sortable, title = "") {
+    const hint = title ? ` title="${escapeHTML(title)}"` : "";
+    if (!sortable) return `<th${hint}>${label}</th>`;
+    const active = historyFilters.sortKey === key;
+    const ascending = historyFilters.sortDirection === "asc";
+    return `<th scope="col" aria-sort="${active ? ascending ? "ascending" : "descending" : "none"}"${hint}><button type="button" class="history-sort" data-history-sort="${key}" aria-label="${label}: сортировать по ${active && ascending ? "убыванию" : "возрастанию"}">${label}<span aria-hidden="true">${active ? ascending ? "↑" : "↓" : "↕"}</span></button></th>`;
+  }
+
+  function historyTable(runs, full = false, emptyMessage = "По выбранным фильтрам запусков нет.") {
+    if (!runs.length && !full) return `<div class="panel table-empty">Запусков пока нет. Создайте первый мир выше.</div>`;
     const rows = runs.map((run) => {
       const broken = run.load_error;
       const uptime = run.uptime_ratio == null ? "—" : percent(run.uptime_ratio, 2);
@@ -285,13 +391,21 @@
         <td><span class="badge ${statusClass(run.status)}">${escapeHTML(run.status)}</span></td>
         <td><span class="badge ${statusClass(run.site_status)}">${escapeHTML(run.site_status || "unknown")}</span></td>
         <td class="mono nowrap">${formatDateTime(run.simulation_time)}</td>
+        <td class="mono nowrap">${run.status === "completed" ? formatRealDuration(run.real_duration_seconds) : "—"}</td>
         <td class="mono">${uptime}</td>
         <td class="mono">${formatMoney(run.total_cost_minor, run.currency)}</td>
         ${full ? `<td class="mono">${formatCompact(run.event_count)}</td>` : ""}
         <td>${broken ? `<span class="log-code">${escapeHTML(broken)}</span>` : `<a class="button secondary compact" href="/ui/runs/${run.run_id}" data-link>${run.status === "completed" ? "Открыть отчёт" : "Продолжить"}</a>`}</td>
       </tr>`;
     }).join("");
-    return `<div class="panel table-scroll"><table class="data-table"><thead><tr><th>Run</th><th>Агент</th><th>Состояние</th><th>Сервис</th><th>Сим. время</th><th>Uptime</th><th>Стоимость</th>${full ? "<th>События</th>" : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="panel table-scroll"><table class="data-table"><thead><tr><th>Run</th>${historyColumn("Агент", "agent_id", full)}<th>Состояние</th><th>Сервис</th><th>Сим. время</th>${historyColumn("Время выполнения", "real_duration_seconds", full, "Реальное время от вызова start до завершения, HH:mm:ss")}${historyColumn("Uptime", "uptime_ratio", full)}${historyColumn("Стоимость", "total_cost_minor", full)}${full ? "<th>События</th>" : ""}<th></th></tr></thead><tbody>${rows || `<tr><td colspan="${full ? 10 : 9}" class="table-empty">${escapeHTML(emptyMessage)}</td></tr>`}</tbody></table></div>`;
+  }
+
+  function formatRealDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "—";
+    const total = Math.floor(seconds);
+    return [Math.floor(total / 3600), Math.floor(total / 60) % 60, total % 60]
+      .map((part) => String(part).padStart(2, "0")).join(":");
   }
 
   function authKey(runId) { return `uptick.auth.${runId}`; }

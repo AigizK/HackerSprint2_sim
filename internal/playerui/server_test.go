@@ -28,7 +28,7 @@ func (f *fakeQuery) Runs(_ context.Context, agentID string, limit, offset int) (
 	uptime, passed := .997, true
 	return []application.DebugRunSummary{{
 		Run: simulation.RunRecord{RunID: "1234567890abcdefghijklmn", AgentID: "sre-agent", AgentVersion: "2.1", CreatedAt: now}, Seed: 42, EventCount: 120,
-		Overview: simulation.OverviewView{RunStatus: "completed", SiteStatus: "healthy", SimulationTime: now, SimulationEndsAt: now,
+		Overview: simulation.RunListOverview{RunStatus: "completed", SiteStatus: "healthy", SimulationTime: now, SimulationEndsAt: now,
 			Availability: simulation.AvailabilityView{UptimeRatio: &uptime, SLOPassed: &passed}, Costs: simulation.CostsView{Currency: "USD", TotalCostMinor: 1234}},
 	}}, nil
 }

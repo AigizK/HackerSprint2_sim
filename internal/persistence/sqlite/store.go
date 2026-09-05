@@ -28,6 +28,9 @@ var controlCredentialsMigration string
 //go:embed migrations/004_server_credentials.sql
 var serverCredentialsMigration string
 
+//go:embed migrations/005_run_summaries.sql
+var runSummariesMigration string
+
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
@@ -59,6 +62,10 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(serverCredentialsMigration); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply sqlite migration 4: %w", err)
+	}
+	if _, err := db.Exec(runSummariesMigration); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply sqlite migration 5: %w", err)
 	}
 	return &Store{db: db}, nil
 }

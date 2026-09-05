@@ -171,6 +171,27 @@ textarea { min-height: 120px; resize: vertical; font: 12px/1.55 var(--mono); }
 .section-heading h1, .section-heading h2 { margin: 0; }
 .section-heading p { margin: 4px 0 0; color: var(--muted); }
 
+.history-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 18px 30px; margin-bottom: 14px; padding: 16px; }
+.history-filters fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.history-filters legend { margin-bottom: 8px; padding: 0; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.history-uptime-range { display: flex; align-items: center; gap: 10px; }
+.history-uptime-range label { color: var(--muted); font-size: 12px; }
+.history-uptime-range input { width: 105px; font-family: var(--mono); }
+.history-uptime-range input[aria-invalid="true"] { border-color: var(--bad); }
+.history-agent-filter { flex: 1 1 270px; max-width: 360px; }
+.history-agent-filter small { margin-left: 6px; color: var(--faint); font-size: 10px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+.history-statuses { flex: 1; }
+.history-status-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; min-height: 38px; }
+.history-status-options label { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; cursor: pointer; }
+.history-status-options input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.history-filters .history-reset { min-height: 38px; }
+.history-filter-error { flex-basis: 100%; margin: 0; color: var(--bad); font-size: 12px; }
+.history-sort { display: inline-flex; align-items: center; gap: 7px; margin: -9px -13px; padding: 9px 13px; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; white-space: nowrap; cursor: pointer; }
+.history-sort span { color: var(--faint); font-size: 13px; }
+.history-sort:hover, .data-table th[aria-sort="ascending"], .data-table th[aria-sort="descending"] { color: var(--accent-ink); background: var(--accent-soft); }
+.data-table th[aria-sort="ascending"] .history-sort span, .data-table th[aria-sort="descending"] .history-sort span { color: var(--accent); }
+.history-sort:focus-visible { position: relative; outline: 2px solid var(--accent); outline-offset: -2px; }
+
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table th { padding: 9px 13px; border-bottom: 1px solid var(--line-strong); color: var(--muted); background: #eef1f4; font: 700 10px/1.2 var(--mono); letter-spacing: .07em; text-align: left; text-transform: uppercase; white-space: nowrap; }
 .data-table td { padding: 12px 13px; border-bottom: 1px solid var(--line); vertical-align: middle; }

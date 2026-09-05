@@ -15,6 +15,7 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/debugui"
 	"github.com/aigizk/hackersprint2-sim/internal/httpapi"
 	"github.com/aigizk/hackersprint2-sim/internal/persistence"
+	"github.com/aigizk/hackersprint2-sim/internal/persistence/journal"
 	"github.com/aigizk/hackersprint2-sim/internal/playerui"
 	"github.com/aigizk/hackersprint2-sim/internal/simulation/generator"
 )
@@ -41,7 +42,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create world generator: %w", err)
 	}
-	storage, err := persistence.Open(*dataPath)
+	storage, err := persistence.Open(*dataPath, journal.WithMaxCachedRuns(*maxCachedRuns))
 	if err != nil {
 		return fmt.Errorf("open storage: %w", err)
 	}

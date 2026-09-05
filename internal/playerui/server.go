@@ -47,22 +47,23 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 type runSummaryResponse struct {
-	RunID             string    `json:"run_id"`
-	AgentID           string    `json:"agent_id"`
-	AgentVersion      string    `json:"agent_version"`
-	Seed              int64     `json:"seed"`
-	Status            string    `json:"status"`
-	SiteStatus        string    `json:"site_status"`
-	SimulationTime    time.Time `json:"simulation_time"`
-	SimulationEndsAt  time.Time `json:"simulation_ends_at"`
-	CreatedAt         time.Time `json:"created_at"`
-	TotalCostMinor    int64     `json:"total_cost_minor"`
-	Currency          string    `json:"currency"`
-	UptimeRatio       *float64  `json:"uptime_ratio"`
-	SLOPassed         *bool     `json:"slo_passed"`
-	EventCount        uint64    `json:"event_count"`
-	AgentRequestCount int       `json:"agent_request_count"`
-	LoadError         string    `json:"load_error,omitempty"`
+	RunID               string    `json:"run_id"`
+	AgentID             string    `json:"agent_id"`
+	AgentVersion        string    `json:"agent_version"`
+	Seed                int64     `json:"seed"`
+	Status              string    `json:"status"`
+	SiteStatus          string    `json:"site_status"`
+	SimulationTime      time.Time `json:"simulation_time"`
+	SimulationEndsAt    time.Time `json:"simulation_ends_at"`
+	CreatedAt           time.Time `json:"created_at"`
+	TotalCostMinor      int64     `json:"total_cost_minor"`
+	Currency            string    `json:"currency"`
+	UptimeRatio         *float64  `json:"uptime_ratio"`
+	SLOPassed           *bool     `json:"slo_passed"`
+	EventCount          uint64    `json:"event_count"`
+	AgentRequestCount   int       `json:"agent_request_count"`
+	RealDurationSeconds *int64    `json:"real_duration_seconds,omitempty"`
+	LoadError           string    `json:"load_error,omitempty"`
 }
 
 type runsResponse struct {
@@ -100,6 +101,7 @@ func (s *Server) handleRuns(writer http.ResponseWriter, request *http.Request) {
 			TotalCostMinor: summary.Overview.Costs.TotalCostMinor, Currency: summary.Overview.Costs.Currency,
 			UptimeRatio: summary.Overview.Availability.UptimeRatio, SLOPassed: summary.Overview.Availability.SLOPassed,
 			EventCount: summary.EventCount, AgentRequestCount: summary.AgentRequestCount, LoadError: summary.LoadError,
+			RealDurationSeconds: summary.RealDurationSeconds,
 		})
 	}
 	if len(summaries) == limit {

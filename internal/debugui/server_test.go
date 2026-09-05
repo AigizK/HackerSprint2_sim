@@ -23,7 +23,10 @@ type fakeQuery struct {
 }
 
 func (f fakeQuery) Runs(context.Context, string, int, int) ([]application.DebugRunSummary, error) {
-	return []application.DebugRunSummary{{Run: f.run, Seed: 1, EventCount: 42, AgentRequestCount: 7, Overview: f.overview}}, nil
+	return []application.DebugRunSummary{{Run: f.run, Seed: 1, EventCount: 42, AgentRequestCount: 7,
+		Overview: simulation.RunListOverview{RunStatus: f.overview.RunStatus, SiteStatus: f.overview.SiteStatus,
+			SimulationTime: f.overview.SimulationTime, SimulationEndsAt: f.overview.SimulationEndsAt,
+			Costs: f.overview.Costs, Availability: f.overview.Availability}}}, nil
 }
 func (f fakeQuery) Overview(context.Context, string) (application.DebugRunOverview, error) {
 	return application.DebugRunOverview{Run: f.run, Overview: f.overview, ActualAgentRequestCount: 8, ActualWallClockRealTime: 3 * time.Second}, nil

@@ -7,16 +7,16 @@ import (
 	"github.com/aigizk/hackersprint2-sim/internal/simulation"
 )
 
-// DebugRunSummary is an operator-only, read-only view of one run. Building it
-// replays the durable journal but never advances simulation time and never
-// writes an agent request audit record.
+// DebugRunSummary uses a compact journal-derived read model. Listing runs never
+// advances simulation time or writes an agent request audit record.
 type DebugRunSummary struct {
-	Run               simulation.RunRecord
-	Seed              int64
-	EventCount        uint64
-	AgentRequestCount int
-	Overview          simulation.OverviewView
-	LoadError         string
+	Run                 simulation.RunRecord
+	Seed                int64
+	EventCount          uint64
+	AgentRequestCount   int
+	RealDurationSeconds *int64
+	Overview            simulation.RunListOverview
+	LoadError           string
 }
 
 type DebugRunOverview struct {
@@ -57,26 +57,48 @@ func (q *DebugQuery) Runs(ctx context.Context, agentID string, limit, offset int
 	result := make([]DebugRunSummary, 0, len(runs))
 	for _, run := range runs {
 		summary := DebugRunSummary{Run: run}
-		session, loadErr := simulation.OpenRunSession(ctx, q.store, run.RunID)
+		view, loadErr := q.runSummary(ctx, run.RunID)
 		if loadErr != nil {
 			summary.LoadError = loadErr.Error()
 			result = append(result, summary)
 			continue
 		}
-		state := session.State()
-		summary.Seed = state.Seed
-		summary.EventCount = session.Version()
-		projection := session.Projection()
-		summary.Overview = projection.Overview()
-		requests, auditErr := q.audit.LoadAgentRequests(ctx, run.RunID)
-		if auditErr != nil {
-			summary.LoadError = auditErr.Error()
-		} else {
-			summary.AgentRequestCount = len(requests)
+		summary.Seed, summary.EventCount = view.Seed, view.EventCount
+		summary.Overview, summary.AgentRequestCount = view.Overview, view.AgentRequestCount
+		startedAt := view.RealStartedAt
+		if startedAt.IsZero() {
+			startedAt = run.CreatedAt
+		}
+		if view.Overview.RunStatus == string(simulation.RunCompleted) && !startedAt.IsZero() &&
+			!view.RealCompletedAt.IsZero() && !view.RealCompletedAt.Before(startedAt) {
+			seconds := int64(view.RealCompletedAt.Sub(startedAt) / time.Second)
+			summary.RealDurationSeconds = &seconds
 		}
 		result = append(result, summary)
 	}
 	return result, nil
+}
+
+func (q *DebugQuery) runSummary(ctx context.Context, runID string) (simulation.RunSummary, error) {
+	if store, ok := q.store.(interface {
+		RunSummary(context.Context, string) (simulation.RunSummary, error)
+	}); ok {
+		return store.RunSummary(ctx, runID)
+	}
+	// Non-journal stores (e.g. the in-memory test store) can use the same reducer.
+	records, err := q.store.Load(ctx, runID)
+	if err != nil {
+		return simulation.RunSummary{}, err
+	}
+	projection := simulation.NewRunSummaryProjection()
+	for _, record := range records {
+		projection.Apply(record)
+	}
+	requests, err := q.audit.LoadAgentRequests(ctx, runID)
+	if err != nil {
+		return simulation.RunSummary{}, err
+	}
+	return projection.View(len(requests)), nil
 }
 
 func (q *DebugQuery) Overview(ctx context.Context, runID string) (DebugRunOverview, error) {
